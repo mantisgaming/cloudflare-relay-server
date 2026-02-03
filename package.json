@@ -1,5 +1,5 @@
 {
-	"name": "totsm-cf-worker",
+	"name": "totsm-cloudflare-relay",
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
