@@ -12,14 +12,14 @@ export const RequestWorker = {
             const codeStub = env.CODE_GENERATOR_DO.getByName("singleton") as DurableObjectStub<CodeGeneratorDO>;
             const lobbyCode = await codeStub.generateCode();
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
-            return stub.connectServer(request);
+            return await stub.connectServer(request, lobbyCode);
         });
 
         router.get("/join/:id", withParams, async (req: IRequest) => {
             const lobbyCode = req.params.id;
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
             if (await stub.hasConnectedServer()) {
-                return stub.connectClient(request);
+                return await stub.connectClient(request);
             } else {
                 return new Response(`Lobby "${lobbyCode}" not found`, { status: 404 });
             }

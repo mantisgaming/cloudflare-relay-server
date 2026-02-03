@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { RelayMessage } from "./RelayMessage";
 
 export class LobbyDO extends DurableObject<Env> {
-    private code: string;
+    private code: string | null = null;
     private server: WebSocket | null = null;
     private peers: Map<number, WebSocket> = new Map<number, WebSocket>();
 	private nextPeer: number = 0;
@@ -10,10 +10,9 @@ export class LobbyDO extends DurableObject<Env> {
 
     constructor(ctx: DurableObjectState<{}>, env: Env) {
         super(ctx, env);
-        this.code = ctx.id.name as string;
     }
 
-    async connectServer(request: Request): Promise<Response> {
+    async connectServer(request: Request, code: string): Promise<Response> {
         // Require that the request is a WebSocket upgrade
         const upgradeHeader = request.headers.get('Upgrade');
         if (!upgradeHeader || upgradeHeader !== "websocket") {
@@ -25,7 +24,9 @@ export class LobbyDO extends DurableObject<Env> {
         }
 
         // Create a WebSocket pair
+        this.code = code;
         const { 0: client, 1: server } = new WebSocketPair();
+        
         server.accept();
         this.server = server;
         console.log(`Server connected to lobby "${this.code}"`);
