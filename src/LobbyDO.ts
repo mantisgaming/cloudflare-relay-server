@@ -126,11 +126,11 @@ export class LobbyDO extends DurableObject<Env> {
     }
 
 	private onServerMessage(event: MessageEvent): void {
-        const data = event.data;
+        const data = new Uint8Array(event.data as ArrayBuffer);
 		if (data == undefined)
 			return;
 
-		var message = RelayMessage.deserialize(data as Uint8Array, RelayMessage.Direction.SERVER_TO_RELAY);
+		var message = RelayMessage.deserialize(data, RelayMessage.Direction.SERVER_TO_RELAY);
 
 		switch (message.type) {
 			case RelayMessage.Type.DATA:
@@ -203,12 +203,11 @@ export class LobbyDO extends DurableObject<Env> {
 
 	private onClientMessage(ID: number): (event: MessageEvent) => void {
 		return (event: MessageEvent) => {
-            const data = event.data;
+            const data = new Uint8Array(event.data as ArrayBuffer);
 			if (data == undefined)
 				return;
 
-			var message = RelayMessage.deserialize(data as Uint8Array, RelayMessage.Direction.CLIENT_TO_RELAY);
-
+			var message = RelayMessage.deserialize(data, RelayMessage.Direction.CLIENT_TO_RELAY);
 			switch (message.type) {
 				case RelayMessage.Type.DATA:
 					this.forwardData(message as RelayMessage.ClientData, ID);
