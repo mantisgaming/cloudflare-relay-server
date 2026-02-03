@@ -12,14 +12,20 @@ export const RequestWorker = {
             const codeStub = env.CODE_GENERATOR_DO.getByName("singleton") as DurableObjectStub<CodeGeneratorDO>;
             const lobbyCode = await codeStub.generateCode();
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
-            return await stub.connectServer(request, lobbyCode);
+
+            let newRequest = new Request(request);
+            newRequest.headers.set("Lobby-Code", lobbyCode);
+            newRequest.headers.set("Method", "create");
+            return await stub.fetch(newRequest);
         });
 
         router.get("/join/:id", withParams, async (req: IRequest) => {
             const lobbyCode = req.params.id;
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
             if (await stub.hasConnectedServer()) {
-                return await stub.connectClient(request);
+                let newRequest = new Request(request);
+                newRequest.headers.set("Method", "join");
+                return await stub.fetch(newRequest);
             } else {
                 return new Response(`Lobby "${lobbyCode}" not found`, { status: 404 });
             }
@@ -30,6 +36,7 @@ export const RequestWorker = {
         });
 
         return router.fetch(request).catch((err) => {
+            console.error(err.message);
             return new Response(err.message || "Internal Error", { status: err.status || 500 });
         });
     },

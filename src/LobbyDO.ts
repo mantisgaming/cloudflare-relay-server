@@ -12,6 +12,22 @@ export class LobbyDO extends DurableObject<Env> {
         super(ctx, env);
     }
 
+	async fetch(request: Request): Promise<Response> {
+		const method = request.headers.get("Method");
+
+		if (method === "create") {
+			const code = request.headers.get("Lobby-Code");
+			if (code == null) {
+				return new Response("Missing Lobby-Code header", { status: 400 });
+			}
+			return await this.connectServer(request, code);
+		} else if (method === "join") {
+			return await this.connectClient(request);
+		}
+
+		return new Response("Not Found", { status: 404 });
+	}
+
     async connectServer(request: Request, code: string): Promise<Response> {
         // Require that the request is a WebSocket upgrade
         const upgradeHeader = request.headers.get('Upgrade');
