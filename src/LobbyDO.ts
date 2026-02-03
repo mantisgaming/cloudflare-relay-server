@@ -43,7 +43,7 @@ export class LobbyDO extends DurableObject<Env> {
         this.code = code;
         const { 0: client, 1: server } = new WebSocketPair();
         
-        server.accept();
+		this.ctx.acceptWebSocket(server);
         this.server = server;
         console.log(`Server connected to lobby "${this.code}"`);
         
@@ -81,7 +81,7 @@ export class LobbyDO extends DurableObject<Env> {
         const { 0: client, 1: server } = new WebSocketPair();
 		this.peers.set(id, server);
 		this.currentPeers |= 1 << id;
-        server.accept();
+		this.ctx.acceptWebSocket(server);
         console.log(`Client ${id} connected to lobby "${this.code}"`);
 
 		server.addEventListener("close", this.onClientClose(id).bind(this));
