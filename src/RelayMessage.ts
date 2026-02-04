@@ -1,16 +1,20 @@
 
+// RelayMessage.ts
+// Definitions and serialization/deserialization for relay messages
+// used in communication between clients, relay, and server.
 export namespace RelayMessage {
+    // Enumeration of message types
     export enum Type {
         UNDEFINED = -1,
         DATA,
         CONNECT,
         DISCONNECT,
         CODE,
-        PING,
         
         MAXIMUM
     }
 
+    // Enumeration of message directions
     export enum Direction {
         SERVER_TO_RELAY,
         RELAY_TO_SERVER,
@@ -18,6 +22,7 @@ export namespace RelayMessage {
         RELAY_TO_CLIENT
     }
 
+    // Type aliases for different message structures
     export type RELAY_TO_ANY =
         Direction.RELAY_TO_CLIENT |
         Direction.RELAY_TO_SERVER;
@@ -34,13 +39,9 @@ export namespace RelayMessage {
         Direction.CLIENT_TO_RELAY |
         Direction.RELAY_TO_CLIENT;
 
+    // Message type definitions
     export type Undefined = {
         type: Type.UNDEFINED,
-        direction: Direction
-    }
-
-    export type Ping = {
-        type: Type.PING,
         direction: Direction
     }
 
@@ -99,27 +100,25 @@ export namespace RelayMessage {
         id: number
     }
 
+    // Deserialize a message from Uint8Array
     export function deserialize(data: Uint8Array, direction: Direction): RelayMessage {
+        // Initialize an undefined message
         var undef: Undefined = {
             direction: direction,
             type: Type.UNDEFINED
         }
 
+        // Check for empty data
         if (data.length == 0)
             return undef;
 
+        // Determine the message type
         var messageType: Type = Type.UNDEFINED;
-
         if (data[0] as number < Type.MAXIMUM.valueOf())
             messageType = data[0] as Type;
         
+        // Parse the message based on its type and direction
         switch(messageType) {
-            case Type.PING:
-                return {
-                    type: messageType,
-                    direction: direction
-                };
-
             case Type.DATA:
                 switch (direction) {
                     case Direction.RELAY_TO_CLIENT:
@@ -193,14 +192,19 @@ export namespace RelayMessage {
         };
     }
 
+    // Serialize a message to Uint8Array
     export function serialize(data: RelayMessage): Uint8Array {
+        // Initialize result array
         var result: number[] = [];
 
+        // Refuse to serialize undefined messages
         if (data.type == Type.UNDEFINED)
             throw Error("Refusal to serialize undefined message");
 
+        // Push the message type
         result.push(data.type.valueOf());
 
+        // Serialize based on message type
         switch (data.type) {
             case Type.DATA:
                 switch (data.direction) {
@@ -234,6 +238,7 @@ export namespace RelayMessage {
         return new Uint8Array(result);
     }
 
+    // Helper functions to parse and encode 32-bit integers
     function parseS32(data: Uint8Array): number {
         if (data.length < 4)
             throw Error("Cannot parse int 32 from less than 4 bytes");
@@ -251,6 +256,7 @@ export namespace RelayMessage {
         );
     }
 
+    // Encode a 32-bit integer into Uint8Array
     function encodeS32(data: number): Uint8Array {
         var result: Uint8Array = new Uint8Array(4);
 
@@ -263,9 +269,9 @@ export namespace RelayMessage {
     }
 }
 
+// Define the RelayMessage type as a union of all message types
 export type RelayMessage =
     RelayMessage.Undefined |
-    RelayMessage.Ping |
     RelayMessage.SendCode |
     RelayMessage.InformConnectServer |
     RelayMessage.InformConnectClient |
