@@ -9,6 +9,10 @@ export const RequestWorker = {
         router.all('*', withParams);
 
         router.get("/create", async (req: IRequest) => {
+            if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+                return new Response("Expected WebSocket Upgrade", { status: 400 });
+            }
+
             const codeStub = env.CODE_GENERATOR_DO.getByName("singleton") as DurableObjectStub<CodeGeneratorDO>;
             const lobbyCode = await codeStub.generateCode();
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
@@ -16,6 +20,10 @@ export const RequestWorker = {
         });
 
         router.get("/join/:id", withParams, async (req: IRequest) => {
+            if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+                return new Response("Expected WebSocket Upgrade", { status: 400 });
+            }
+            
             const lobbyCode = req.params.id;
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
             if (await stub.hasConnectedServer()) {
