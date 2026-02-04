@@ -29,7 +29,7 @@
 		]
 	},
 	"observability": {
-		"enabled": false
+		"enabled": true
 	},
 	/**
 	 * Smart Placement
