@@ -50,7 +50,7 @@ export const RequestWorker = {
             }
             
             // Get the lobby code from the URL parameters
-            const lobbyCode = req.params.id;
+            const lobbyCode = req.params.id.toUpperCase();
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
 
             console.log(`Worker: Joining lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
