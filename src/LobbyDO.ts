@@ -180,6 +180,8 @@ export class LobbyDO extends DurableObject<Env> {
 			id: id
 		}));
 
+		this.saveState();
+
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
 	}
@@ -233,6 +235,8 @@ export class LobbyDO extends DurableObject<Env> {
 				ws.close();
 			}
 		}
+		
+		this.saveState();
 	}
 
 	webSocketError(ws: WebSocket, error: unknown): void {
@@ -263,6 +267,8 @@ export class LobbyDO extends DurableObject<Env> {
 			this.getWebSocket(peer)?.close();
 		});
 		this.peers.clear();
+		
+		this.saveState();
 	}
 
 	// Handle messages from the server
@@ -333,6 +339,7 @@ export class LobbyDO extends DurableObject<Env> {
 			this.getWebSocket(this.server)?.send(RelayMessage.serialize(msg));
 		}
 
+		this.saveState();
 	}
 
 	// Handle server WebSocket errors
