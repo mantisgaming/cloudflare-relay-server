@@ -27,6 +27,8 @@ export const RequestWorker = {
             // Get the Durable Object stub for the new lobby
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
 
+            console.log(`Worker: Creating lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
+
             if (await stub.hasConnectedServer()) {
                 return new Response(`Lobby code collision: "${lobbyCode}" already exists`, { status: 403 });
             }
@@ -51,6 +53,8 @@ export const RequestWorker = {
             const lobbyCode = req.params.id;
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
 
+            console.log(`Worker: Joining lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
+
             // Check if the lobby exists by seeing if a server is connected
             if (await stub.hasConnectedServer()) {
                 // Forward the request to join the lobby
@@ -72,7 +76,7 @@ export const RequestWorker = {
 
         // Handle the request using the router
         return router.fetch(request).catch((err) => {
-            console.error(err.message);
+            console.error(`Worker: Error handling request: ${err.message}`);
             return new Response(err.message || "Internal Error", { status: err.status || 500 });
         });
     },

@@ -53,7 +53,7 @@ export class LobbyDO extends DurableObject<Env> {
 		const { 0: client, 1: server } = new WebSocketPair();
 
 		// Accept the server WebSocket
-		this.ctx.acceptWebSocket(server);
+		server.accept();
 		this.server = server;
 		console.log(`Server connected to lobby "${this.code}"`);
 
@@ -99,7 +99,7 @@ export class LobbyDO extends DurableObject<Env> {
 		// Accept the client WebSocket
 		this.peers.set(id, server);
 		this.currentPeers |= 1 << id;
-		this.ctx.acceptWebSocket(server);
+		server.accept();
 		console.log(`Client ${id} connected to lobby "${this.code}"`);
 
 		// Set up event listeners
@@ -138,7 +138,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 	// Handle server disconnection
 	private onServerClose(event: CloseEvent) {
-		console.log(`Server disconnected from lobby ${this.code}`);
+		console.log(`Relay "${this.code}": server disconnected`);
 
 		// Reset the lobby state
 		this.server = null;
@@ -210,7 +210,11 @@ export class LobbyDO extends DurableObject<Env> {
 			id: ID
 		};
 
-		this.server!.send(RelayMessage.serialize(msg))
+		if (this.server !== null) {
+			console.warn(`Relay "${this.code}": Cannot kick client "${ID}" No server connected.`);
+			this.server.send(RelayMessage.serialize(msg));
+		}
+
 	}
 
 	// Handle server WebSocket errors
@@ -231,7 +235,9 @@ export class LobbyDO extends DurableObject<Env> {
 			};
 
 			// Send the message to the server
-			this.server!.send(RelayMessage.serialize(msg));
+			if (this.server !== null) {
+				this.server.send(RelayMessage.serialize(msg));
+			}
 
 			// Remove the client from peers
 			this.peers.delete(ID);
@@ -307,7 +313,9 @@ export class LobbyDO extends DurableObject<Env> {
 			}
 
 			// Send to the server
-			this.server!.send(RelayMessage.serialize(newMessage));
+			if (this.server !== null) {
+				this.server.send(RelayMessage.serialize(newMessage));
+			}
 		}
 	}
 }
