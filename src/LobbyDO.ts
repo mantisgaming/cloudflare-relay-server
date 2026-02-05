@@ -5,14 +5,88 @@ import { RelayMessage } from "./RelayMessage";
 export class LobbyDO extends DurableObject<Env> {
 	// Lobby state
 	private code: string | null = null;
-	private server: WebSocket | null = null;
-	private peers: Map<number, WebSocket> = new Map<number, WebSocket>();
+	private server: string | null = null;
+	private peers: Map<number, string> = new Map<number, string>();
 	private nextPeer: number = 0;
 	private currentPeers: number = 0;
+
+	private websocketMap: Map<string, WebSocket> = new Map<string, WebSocket>();
 
 	// Constructor
 	constructor(ctx: DurableObjectState<{}>, env: Env) {
 		super(ctx, env);
+		this.loadState();
+
+		ctx.getWebSockets().forEach((ws) => {
+			const id = ws.deserializeAttachment() as string | undefined;
+			if (id === undefined) {
+				ws.close(1008, "Missing WebSocket attachment");
+				return;
+			}
+			this.websocketMap.set(id, ws);
+		});
+	}
+
+	// Persist the current state to storage
+	private async saveState(): Promise<void> {
+		await this.ctx.blockConcurrencyWhile(async () => {
+			await this.ctx.storage.put("code", this.code);
+			await this.ctx.storage.put("server", this.server);
+			await this.ctx.storage.put("peers", JSON.stringify(Array.from(this.peers.entries())));
+			await this.ctx.storage.put("nextPeer", this.nextPeer.toString());
+			await this.ctx.storage.put("currentPeers", this.currentPeers.toString());
+		});
+	}
+
+	private async loadState(): Promise<void> {
+		await this.ctx.blockConcurrencyWhile(async () => {
+			this.code = await this.ctx.storage.get("code") ?? this.code;
+			this.server = await this.ctx.storage.get("server") ?? this.server;
+			const peersData = await this.ctx.storage.get("peers");
+			if (peersData !== undefined) {
+				this.peers = new Map<number, string>(JSON.parse(peersData as string));
+			}
+			const nextPeerData = await this.ctx.storage.get("nextPeer");
+			if (nextPeerData !== undefined) {
+				this.nextPeer = parseInt(nextPeerData as string);
+			}
+			const currentPeersData = await this.ctx.storage.get("currentPeers");
+			if (currentPeersData !== undefined) {
+				this.currentPeers = parseInt(currentPeersData as string);
+			}
+		});
+	}
+
+	private saveWebSocket(ws: WebSocket): string {
+		const wsId = crypto.randomUUID();
+		this.websocketMap.set(wsId, ws);
+		ws.serializeAttachment(wsId);
+		return wsId;
+	}
+
+	private getWebSocket(id: string | null): WebSocket | null {
+		if (id === null) {
+			return null;
+		}
+		return this.websocketMap.get(id) ?? null;
+	}
+
+	private getPeerWebSocket(id: number): WebSocket | null {
+		const wsId = this.peers.get(id) ?? null;
+		return this.getWebSocket(wsId);
+	}
+
+	private getPeerFromWebSocket(wsID: string): number | null {
+		for (const [id, storedWsID] of this.peers.entries()) {
+			if (storedWsID === wsID) {
+				return id;
+			}
+		}
+		return null;
+	}
+
+	private isSocketServer(wsID: string): boolean {
+		return this.server === wsID;
 	}
 
 	// Handle incoming requests
@@ -53,21 +127,18 @@ export class LobbyDO extends DurableObject<Env> {
 		const { 0: client, 1: server } = new WebSocketPair();
 
 		// Accept the server WebSocket
-		server.accept();
-		this.server = server;
+		this.ctx.acceptWebSocket(server);
+		this.server = this.saveWebSocket(server);
 		console.log(`Relay "${this.code}": Server connected to lobby`);
 
-		// Set up event listeners
-		server.addEventListener("close", this.onServerClose.bind(this));
-		server.addEventListener("message", this.onServerMessage.bind(this));
-		server.addEventListener("error", this.onServerError.bind(this));
-
 		// Send the lobby code to the server
-		this.server.send(RelayMessage.serialize({
+		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
 			type: RelayMessage.Type.CODE,
 			direction: RelayMessage.Direction.RELAY_TO_SERVER,
 			code: this.code
 		}));
+
+		this.saveState();
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
@@ -97,18 +168,13 @@ export class LobbyDO extends DurableObject<Env> {
 		const { 0: client, 1: server } = new WebSocketPair();
 
 		// Accept the client WebSocket
-		this.peers.set(id, server);
+		this.ctx.acceptWebSocket(server);
+		this.peers.set(id, this.saveWebSocket(server));
 		this.currentPeers |= 1 << id;
-		server.accept();
-		console.log(`Relay "${this.code}": Client ${id} connected to lobby`);
-
-		// Set up event listeners
-		server.addEventListener("close", this.onClientClose(id).bind(this));
-		server.addEventListener("message", this.onClientMessage(id).bind(this));
-		server.addEventListener("error", this.onClientError(id).bind(this));
+		console.log(`Relay "${this.code}": Client "${id}" connected to lobby`);
 
 		// Inform the server of the new connection
-		this.server.send(RelayMessage.serialize({
+		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
 			direction: RelayMessage.Direction.RELAY_TO_SERVER,
 			type: RelayMessage.Type.CONNECT,
 			id: id
@@ -132,14 +198,59 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Check if a server is connected
-	async hasConnectedServer(): Promise<boolean> {
-		return this.server !== null;
+	hasConnectedServer(): boolean {
+		return this.server !== null && this.getWebSocket(this.server) !== null;
+	}
+
+	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+		const wsID = ws.deserializeAttachment() as string;
+		if (this.isSocketServer(wsID)) {
+			this.onServerMessage(new MessageEvent("message", { data: message }));
+		} else {
+			const peerID = this.getPeerFromWebSocket(wsID);
+			if (peerID !== null) {
+				this.onClientMessage(peerID, new MessageEvent("message", { data: message }));
+			} else {
+				console.warn(`Relay "${this.code}": Received message from unknown WebSocket`);
+			}
+		}
+	}
+
+	webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void {
+		const wsID = ws.deserializeAttachment() as string;
+		if (this.isSocketServer(wsID)) {
+			this.onServerClose(new CloseEvent("close", { code, reason, wasClean }));
+		} else {
+			const peerID = this.getPeerFromWebSocket(wsID);
+			if (peerID !== null) {
+				this.onClientClose(peerID, new CloseEvent("close", { code, reason, wasClean }));
+			} else {
+				if (this.hasConnectedServer()) {
+					console.warn(`Relay "${this.code}": Received close event from unknown WebSocket`);
+				}
+				ws.close();
+			}
+		}
+	}
+
+	webSocketError(ws: WebSocket, error: unknown): void {
+		const wsID = ws.deserializeAttachment() as string;
+		if (this.isSocketServer(wsID)) {
+			this.onServerError(new ErrorEvent("error", { error }));
+		} else {
+			const peerID = this.getPeerFromWebSocket(wsID);
+			if (peerID !== null) {
+				this.onClientError(peerID, new ErrorEvent("error", { error }));
+			} else {
+				console.warn(`Relay "${this.code}": Received error from unknown WebSocket`);
+			}
+		}
 	}
 
 	// Handle server disconnection
 	private onServerClose(event: CloseEvent) {
 		console.log(`Relay "${this.code}": server disconnected`);
-		this.server?.close();
+		this.getWebSocket(this.server)?.close();
 
 		// Reset the lobby state
 		this.server = null;
@@ -147,7 +258,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Disconnect all connected peers
 		this.peers.forEach((peer) => {
-			peer.close();
+			this.getWebSocket(peer)?.close();
 		});
 		this.peers.clear();
 	}
@@ -180,7 +291,7 @@ export class LobbyDO extends DurableObject<Env> {
 				const acceptMsg = message as RelayMessage.AcceptConnection;
 				const peer = this.peers.get(acceptMsg.id);
 				if (peer != undefined)
-					peer.send(RelayMessage.serialize(msg));
+					this.getWebSocket(peer)?.send(RelayMessage.serialize(msg));
 				else
 					console.warn(`Relay "${this.code}": Cannot send accept to invalid peer ID "${acceptMsg.id}"`);
 				break;
@@ -193,8 +304,8 @@ export class LobbyDO extends DurableObject<Env> {
 	// Disconnect a client by ID
 	private kickClient(ID: number): void {
 		// Find the client WebSocket
-		let ws = this.peers.get(ID);
-		if (ws == undefined) {
+		let ws = this.getPeerWebSocket(ID);
+		if (ws === null) {
 			console.warn(`Relay "${this.code}": Cannot kick client "${ID}" They do not exist.`);
 			return;
 		}
@@ -213,7 +324,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		if (this.server !== null) {
 			console.warn(`Relay "${this.code}": Cannot kick client "${ID}" No server connected.`);
-			this.server.send(RelayMessage.serialize(msg));
+			this.getWebSocket(this.server)?.send(RelayMessage.serialize(msg));
 		}
 
 	}
@@ -224,56 +335,50 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Handle client disconnection
-	private onClientClose(ID: number): (event: CloseEvent) => void {
-		return (event: CloseEvent) => {
-			console.log(`Relay "${this.code}": Client "${ID}" disconnected`);
-			this.peers.get(ID)?.close();
+	private onClientClose(ID: number, event: CloseEvent): void {
+		console.log(`Relay "${this.code}": Client "${ID}" disconnected`);
+		this.getPeerWebSocket(ID)?.close();
 
-			// Inform the server of the disconnection
-			let msg: RelayMessage.InformDisconnect = {
-				direction: RelayMessage.Direction.RELAY_TO_SERVER,
-				type: RelayMessage.Type.DISCONNECT,
-				id: ID
-			};
-
-			// Send the message to the server
-			if (this.server !== null) {
-				this.server.send(RelayMessage.serialize(msg));
-			}
-
-			// Remove the client from peers
-			this.peers.delete(ID);
-			this.currentPeers &= ~(1 << ID);
+		// Inform the server of the disconnection
+		let msg: RelayMessage.InformDisconnect = {
+			direction: RelayMessage.Direction.RELAY_TO_SERVER,
+			type: RelayMessage.Type.DISCONNECT,
+			id: ID
 		};
+
+		// Send the message to the server
+		if (this.server !== null) {
+			this.getWebSocket(this.server)?.send(RelayMessage.serialize(msg));
+		}
+
+		// Remove the client from peers
+		this.peers.delete(ID);
+		this.currentPeers &= ~(1 << ID);
 	}
 
 	// Handle messages from a client
-	private onClientMessage(ID: number): (event: MessageEvent) => void {
-		return (event: MessageEvent) => {
-			// Deserialize the message
-			const data = new Uint8Array(event.data as ArrayBuffer);
-			if (data == undefined)
+	private onClientMessage(ID: number, event: MessageEvent): void {
+		// Deserialize the message
+		const data = new Uint8Array(event.data as ArrayBuffer);
+		if (data == undefined)
+			return;
+
+		var message = RelayMessage.deserialize(data, RelayMessage.Direction.CLIENT_TO_RELAY);
+
+		// Handle the message based on its type
+		switch (message.type) {
+			case RelayMessage.Type.DATA:
+				this.forwardData(message as RelayMessage.ClientData, ID);
 				return;
-
-			var message = RelayMessage.deserialize(data, RelayMessage.Direction.CLIENT_TO_RELAY);
-
-			// Handle the message based on its type
-			switch (message.type) {
-				case RelayMessage.Type.DATA:
-					this.forwardData(message as RelayMessage.ClientData, ID);
-					return;
-				default:
-					console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
-					return;
-			}
-		};
+			default:
+				console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
+				return;
+		}
 	}
 
 	// Handle client WebSocket errors
-	private onClientError(ID: number): (error: ErrorEvent) => void {
-		return (error: ErrorEvent) => {
-			console.warn(`Relay "${this.code}": Client "${ID}" web socket error: ${error.message}`);
-		}
+	private onClientError(ID: number, error: ErrorEvent): void {
+		console.warn(`Relay "${this.code}": Client "${ID}" web socket error: ${error.message}`);
 	}
 
 	// Forward data between server and clients
@@ -298,8 +403,8 @@ export class LobbyDO extends DurableObject<Env> {
 
 				// Send the message if connected
 				if (shouldSend) {
-					const peer = this.peers.get(i);
-					if (peer != undefined)
+					const peer = this.getPeerWebSocket(i);
+					if (peer != null)
 						peer.send(serialMessage);
 					else
 						console.warn(`Relay "${this.code}": Cannot send data to invalid peer ID "${i}"`);
@@ -316,7 +421,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 			// Send to the server
 			if (this.server !== null) {
-				this.server.send(RelayMessage.serialize(newMessage));
+				this.getWebSocket(this.server)?.send(RelayMessage.serialize(newMessage));
 			}
 		}
 	}
