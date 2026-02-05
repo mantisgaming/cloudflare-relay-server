@@ -139,6 +139,7 @@ export class LobbyDO extends DurableObject<Env> {
 	// Handle server disconnection
 	private onServerClose(event: CloseEvent) {
 		console.log(`Relay "${this.code}": server disconnected`);
+		this.server?.close();
 
 		// Reset the lobby state
 		this.server = null;
@@ -226,6 +227,7 @@ export class LobbyDO extends DurableObject<Env> {
 	private onClientClose(ID: number): (event: CloseEvent) => void {
 		return (event: CloseEvent) => {
 			console.log(`Relay "${this.code}": Client "${ID}" disconnected`);
+			this.peers.get(ID)?.close();
 
 			// Inform the server of the disconnection
 			let msg: RelayMessage.InformDisconnect = {
