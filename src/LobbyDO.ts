@@ -212,6 +212,8 @@ export class LobbyDO extends DurableObject<Env> {
 				this.onClientMessage(peerID, new MessageEvent("message", { data: message }));
 			} else {
 				console.warn(`Relay "${this.code}": Received message from unknown WebSocket`);
+				console.log(`Known websockets: ${JSON.stringify(this.websocketMap)}`)
+				ws.close();
 			}
 		}
 	}
@@ -296,6 +298,10 @@ export class LobbyDO extends DurableObject<Env> {
 					console.warn(`Relay "${this.code}": Cannot send accept to invalid peer ID "${acceptMsg.id}"`);
 				break;
 
+			case RelayMessage.Type.PING:
+				this.getWebSocket(this.server)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_SERVER }));
+				break;
+
 			default:
 				console.warn(`Relay "${this.code}": Unexpected message type from server: ${(data as Uint8Array)[0]}`)
 		}
@@ -370,6 +376,9 @@ export class LobbyDO extends DurableObject<Env> {
 			case RelayMessage.Type.DATA:
 				this.forwardData(message as RelayMessage.ClientData, ID);
 				return;
+			case RelayMessage.Type.PING:
+				this.getPeerWebSocket(ID)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_CLIENT }));
+				return;
 			default:
 				console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
 				return;
@@ -399,7 +408,9 @@ export class LobbyDO extends DurableObject<Env> {
 			// Send to all connected peers
 			for (let i = 0; i < 32; i++) {
 				// Check if the peer is connected
-				const shouldSend: boolean = (this.currentPeers >>> i & 1) === 1;
+				const shouldSend: boolean =
+					(this.currentPeers >>> i & 1) === 1 &&
+					(message.destinations >>> i & 1) === 1;
 
 				// Send the message if connected
 				if (shouldSend) {

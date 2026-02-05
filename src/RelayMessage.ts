@@ -10,6 +10,7 @@ export namespace RelayMessage {
         CONNECT,
         DISCONNECT,
         CODE,
+        PING,
         
         MAXIMUM
     }
@@ -42,6 +43,11 @@ export namespace RelayMessage {
     // Message type definitions
     export type Undefined = {
         type: Type.UNDEFINED,
+        direction: Direction
+    }
+
+    export type Ping = {
+        type: Type.PING,
         direction: Direction
     }
 
@@ -119,6 +125,11 @@ export namespace RelayMessage {
         
         // Parse the message based on its type and direction
         switch(messageType) {
+            case Type.PING:
+                return {
+                    type: messageType,
+                    direction: direction
+                };
             case Type.DATA:
                 switch (direction) {
                     case Direction.RELAY_TO_CLIENT:
@@ -272,6 +283,7 @@ export namespace RelayMessage {
 // Define the RelayMessage type as a union of all message types
 export type RelayMessage =
     RelayMessage.Undefined |
+    RelayMessage.Ping |
     RelayMessage.SendCode |
     RelayMessage.InformConnectServer |
     RelayMessage.InformConnectClient |
