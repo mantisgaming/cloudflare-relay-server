@@ -26,10 +26,7 @@ export class LobbyDO extends DurableObject<Env> {
 			this.websocketMap.set(id, ws);
 		});
 
-		ctx.setWebSocketAutoResponse({
-			request: "\u0004",
-			response: "\u0004"
-		});
+		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("\u0004", "\u0004"));
 	}
 
 	// Persist the current state to storage
