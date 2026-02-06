@@ -25,6 +25,11 @@ export class LobbyDO extends DurableObject<Env> {
 			}
 			this.websocketMap.set(id, ws);
 		});
+
+		ctx.setWebSocketAutoResponse({
+			request: "\u0004",
+			response: "\u0004"
+		});
 	}
 
 	// Persist the current state to storage
@@ -235,7 +240,7 @@ export class LobbyDO extends DurableObject<Env> {
 				ws.close();
 			}
 		}
-		
+
 		this.saveState();
 	}
 
@@ -267,7 +272,7 @@ export class LobbyDO extends DurableObject<Env> {
 			this.getWebSocket(peer)?.close();
 		});
 		this.peers.clear();
-		
+
 		this.saveState();
 	}
 
