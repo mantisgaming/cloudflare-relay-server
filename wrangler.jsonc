@@ -16,6 +16,12 @@
 			]
 		}
 	],
+	"routes": [
+		{
+			"custom_domain": true,
+			"pattern": "relay.totsmgame.com",
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
