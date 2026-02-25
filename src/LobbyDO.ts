@@ -9,6 +9,7 @@ export class LobbyDO extends DurableObject<Env> {
 	private peers: Map<number, string> = new Map<number, string>();
 	private nextPeer: number = 0;
 	private currentPeers: number = 0;
+	private lastUsedTime: Map<string, number> = new Map<string, number>();
 
 	private websocketMap: Map<string, WebSocket> = new Map<string, WebSocket>();
 
@@ -25,8 +26,6 @@ export class LobbyDO extends DurableObject<Env> {
 			}
 			this.websocketMap.set(id, ws);
 		});
-
-		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("\u0004", "\u0004"));
 	}
 
 	// Persist the current state to storage
@@ -37,6 +36,7 @@ export class LobbyDO extends DurableObject<Env> {
 			await this.ctx.storage.put("peers", JSON.stringify(Array.from(this.peers.entries())));
 			await this.ctx.storage.put("nextPeer", this.nextPeer.toString());
 			await this.ctx.storage.put("currentPeers", this.currentPeers.toString());
+			await this.ctx.storage.put("lastUsedTimes", JSON.stringify(Array.from(this.lastUsedTime.entries())));
 		});
 	}
 
@@ -56,6 +56,10 @@ export class LobbyDO extends DurableObject<Env> {
 			if (currentPeersData !== undefined) {
 				this.currentPeers = parseInt(currentPeersData as string);
 			}
+			const lastUsedTimeData = await this.ctx.storage.get("lastUsedTimes");
+			if (peersData !== undefined) {
+				this.lastUsedTime = new Map<string, number>(JSON.parse(peersData as string));
+			}
 		});
 	}
 
@@ -63,6 +67,7 @@ export class LobbyDO extends DurableObject<Env> {
 		const wsId = crypto.randomUUID();
 		this.websocketMap.set(wsId, ws);
 		ws.serializeAttachment(wsId);
+		this.lastUsedTime.set(wsId, Date.now());
 		return wsId;
 	}
 
@@ -89,6 +94,21 @@ export class LobbyDO extends DurableObject<Env> {
 
 	private isSocketServer(wsID: string): boolean {
 		return this.server === wsID;
+	}
+
+	private cleanup(): void {
+		this.websocketMap.forEach((socket, key) => {
+			const wsID = socket.deserializeAttachment() as string;
+			const lastAutoResponse = this.lastUsedTime.get(wsID)!;
+
+			if (Date.now() - lastAutoResponse > 30000) {
+				if (this.isSocketServer(key)) {
+					this.onServerClose(new CloseEvent("Server timed out"));
+				} else {
+					this.onClientClose(this.getPeerFromWebSocket(key)!, new CloseEvent("Client timed out"));
+				}
+			}
+		});
 	}
 
 	// Handle incoming requests
@@ -208,6 +228,9 @@ export class LobbyDO extends DurableObject<Env> {
 
 	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
 		const wsID = ws.deserializeAttachment() as string;
+		this.lastUsedTime.set(wsID, Date.now());
+
+		this.cleanup();
 		if (this.isSocketServer(wsID)) {
 			this.onServerMessage(new MessageEvent("message", { data: message }));
 		} else {
@@ -224,6 +247,9 @@ export class LobbyDO extends DurableObject<Env> {
 
 	webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void {
 		const wsID = ws.deserializeAttachment() as string;
+		this.lastUsedTime.delete(wsID);
+
+		this.cleanup();
 		if (this.isSocketServer(wsID)) {
 			this.onServerClose(new CloseEvent("close", { code, reason, wasClean }));
 		} else {
@@ -242,6 +268,7 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	webSocketError(ws: WebSocket, error: unknown): void {
+		this.cleanup();
 		const wsID = ws.deserializeAttachment() as string;
 		if (this.isSocketServer(wsID)) {
 			this.onServerError(new ErrorEvent("error", { error }));
