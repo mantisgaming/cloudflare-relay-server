@@ -19,22 +19,6 @@
 			]
 		}
 	],
-	"route": {
-		"pattern": "totsmgame.com/relay/*",
-		"zone_name": "totsmgame.com"
-	},
-	"durable_objects": {
-		"bindings": [
-			{
-				"class_name": "LobbyDO",
-				"name": "LOBBY_DO"
-			},
-			{
-				"class_name": "CodeGeneratorDO",
-				"name": "CODE_GENERATOR_DO"
-			}
-		]
-	},
 	"observability": {
 		"enabled": true
 	},
@@ -57,10 +41,64 @@
 	},
 	"minify": true,
 	"env": {
+		"production": {
+			"routes": [
+				{
+					"pattern": "totsmgame.com/relay/*",
+					"zone_name": "totsmgame.com"
+				},
+				{
+					"pattern": "www.totsmgame.com/relay/*",
+					"zone_name": "totsmgame.com"
+				},
+				{
+					"custom_domain": true,
+					"pattern": "relay.totsmgame.com",
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "LobbyDO",
+						"name": "LOBBY_DO"
+					},
+					{
+						"class_name": "CodeGeneratorDO",
+						"name": "CODE_GENERATOR_DO"
+					}
+				]
+			},
+			"vars": {
+				"CODE_LENGTH": 4,
+				"CODE_INCREMENTER": 318211
+			}
+		},
 		"development": {
-			"route": {
-				"pattern": "dev.totsmgame.com/relay/*",
-				"zone_name": "totsmgame.com"
+			"routes": [
+				{
+					"pattern": "dev.totsmgame.com/relay/*",
+					"zone_name": "totsmgame.com"
+				},
+				{
+					"custom_domain": true,
+					"pattern": "relay-dev.totsmgame.com",
+				}
+			],
+			"durable_objects": {
+				"bindings": [
+					{
+						"class_name": "LobbyDO",
+						"name": "LOBBY_DO"
+					},
+					{
+						"class_name": "CodeGeneratorDO",
+						"name": "CODE_GENERATOR_DO"
+					}
+				]
+			},
+			"vars": {
+				"CODE_LENGTH": 4,
+				"CODE_INCREMENTER": 318211
 			}
 		}
 	}
