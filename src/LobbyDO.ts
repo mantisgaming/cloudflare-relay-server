@@ -101,7 +101,7 @@ export class LobbyDO extends DurableObject<Env> {
 			const wsID = socket.deserializeAttachment() as string;
 			const lastAutoResponse = this.lastUsedTime.get(wsID)!;
 
-			if (Date.now() - lastAutoResponse > 30000) {
+			if (Date.now() - lastAutoResponse > 5000) {
 				if (this.isSocketServer(key)) {
 					this.onServerClose(new CloseEvent("Server timed out"));
 				} else {

@@ -14,7 +14,7 @@ export const RequestWorker = {
         router.all('*', withParams);
 
         // Route for creating a new lobby
-        router.get("/create", async (req: IRequest) => {
+        router.get("/relay/create", async (req: IRequest) => {
             // Ensure the request is a WebSocket upgrade
             if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
@@ -43,7 +43,7 @@ export const RequestWorker = {
         });
 
         // Route for joining an existing lobby
-        router.get("/join/:id", withParams, async (req: IRequest) => {
+        router.get("/relay/join/:id", withParams, async (req: IRequest) => {
             // Ensure the request is a WebSocket upgrade
             if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
