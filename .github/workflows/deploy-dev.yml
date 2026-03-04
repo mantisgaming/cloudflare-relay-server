@@ -21,4 +21,6 @@ jobs:
           environment: development
           # Commands to execute before deploying the Workers project
           preCommands: npm install
+          # The version of Wrangler you'd like to use to deploy your Workers project
+          wranglerVersion: latest
           

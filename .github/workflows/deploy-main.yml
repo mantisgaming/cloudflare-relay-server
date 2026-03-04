@@ -19,4 +19,5 @@ jobs:
           accountId: 40a2d583b7f018c40070adaa6d07b198
           # Commands to execute before deploying the Workers project
           preCommands: npm install
-          
+          # The version of Wrangler you'd like to use to deploy your Workers project
+          wranglerVersion: latest
