@@ -71,7 +71,13 @@
 			"vars": {
 				"CODE_LENGTH": 4,
 				"CODE_INCREMENTER": 318211
-			}
+			},
+			"d1_databases": [
+				{
+					"binding": "RELAY_D1",
+					"database_name": "RELAY_D1"
+				}
+			]
 		},
 		"development": {
 			"routes": [
@@ -99,7 +105,31 @@
 			"vars": {
 				"CODE_LENGTH": 4,
 				"CODE_INCREMENTER": 318211
-			}
+			},
+			"d1_databases": [
+				{
+					"binding": "RELAY_D1",
+					"database_name": "RELAY_D1"
+				}
+			]
 		}
-	}
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "LobbyDO",
+				"name": "LOBBY_DO"
+			},
+			{
+				"class_name": "CodeGeneratorDO",
+				"name": "CODE_GENERATOR_DO"
+			}
+		]
+	},
+	"d1_databases": [
+		{
+			"binding": "RELAY_D1",
+			"database_name": "RELAY_D1"
+		}
+	]
 }
