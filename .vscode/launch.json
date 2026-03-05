@@ -16,7 +16,10 @@
                 "<node_internals>/**"
             ],
             "type": "node",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "env": {
+                "CLOUDFLARE_ENV": "development"
+            }
         }
     ]
 }
