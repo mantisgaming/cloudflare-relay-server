@@ -109,7 +109,7 @@
 			"d1_databases": [
 				{
 					"binding": "RELAY_D1",
-					"database_name": "RELAY_D1"
+					"database_name": "RELAY_D1_DEV"
 				}
 			]
 		}
