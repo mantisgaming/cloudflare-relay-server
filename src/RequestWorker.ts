@@ -80,4 +80,8 @@ export const RequestWorker = {
             return new Response(err.message || "Internal Error", { status: err.status || 500 });
         });
     },
+    async scheduled(cont, env, ctx): Promise<void> {
+        // Scheduler gets called every 5 seconds
+        // TODO: ping and garbage collection
+    }
 } satisfies ExportedHandler<Env>;
