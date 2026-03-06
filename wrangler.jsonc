@@ -78,8 +78,7 @@
 				{
 					"binding": "RELAY_D1",
 					"database_name": "RELAY_D1",
-					"database_id": "35906a97-3083-4893-b77d-a2a0bf521085",
-					"remote": true,
+					"database_id": "35906a97-3083-4893-b77d-a2a0bf521085"
 				}
 			]
 		},
@@ -115,8 +114,7 @@
 				{
 					"binding": "RELAY_D1",
 					"database_name": "RELAY_D1_DEV",
-					"database_id": "104e74dd-6955-429c-af3d-5b6a1b715a7f",
-					"remote": true,
+					"database_id": "104e74dd-6955-429c-af3d-5b6a1b715a7f"
 				}
 			]
 		}
@@ -137,8 +135,7 @@
 		{
 			"binding": "RELAY_D1",
 			"database_name": "RELAY_D1",
-			"database_id": "35906a97-3083-4893-b77d-a2a0bf521085",
-			"remote": true,
+			"database_id": "35906a97-3083-4893-b77d-a2a0bf521085"
 		}
 	]
 }

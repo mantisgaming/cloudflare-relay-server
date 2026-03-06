@@ -114,11 +114,11 @@ export const RequestWorker = {
     },
     async scheduled(cont, env, ctx): Promise<void> {
         // Scheduler gets called every 5 seconds
-        cleanupLobbies(env).catch((err) => {
+        await cleanupLobbies(env).catch((err) => {
             console.error(`Worker: Error during scheduled cleanup: ${err.message}`);
         });
 
-        sendPingsInLobbies(env).catch((err) => {
+        await sendPingsInLobbies(env).catch((err) => {
             console.error(`Worker: Error during scheduled ping: ${err.message}`);
         });
     }
@@ -162,19 +162,22 @@ async function cleanupLobbies(env: Env): Promise<void> {
     `).all() as { results: LobbyRecord[] };
 
     // Delete old lobbies from the database
-    env.RELAY_D1.prepare(`
-        DELETE * FROM lobbies
+    await env.RELAY_D1.prepare(`
+        DELETE FROM lobbies
         WHERE
-            (last_updated < unixepoch() - 30) OR 
-            (last_updated < unixepoch() - 5 AND NOT connected)
+            (last_updated < unixepoch() - 86400) OR 
+            (last_updated < unixepoch() - 300 AND NOT connected)
     `).run();
+
+    var resetPromises: Promise<void>[] = [];
 
     // Cleanup the corresponding Durable Objects
     for (const lobby of lobbies) {
         const code = lobby.code;
         const stub = env.LOBBY_DO.getByName(code) as DurableObjectStub<LobbyDO>;
-        stub.reset();
+        resetPromises.push(stub.reset());
     }
+    await Promise.all(resetPromises);
 }
 
 async function sendPingsInLobbies(env: Env): Promise<void> {

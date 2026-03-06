@@ -400,6 +400,9 @@ export class LobbyDO extends DurableObject<Env> {
 					console.warn(`Relay "${this.code}": Cannot send accept to invalid peer ID "${acceptMsg.id}"`);
 				break;
 
+			case RelayMessage.Type.PING:
+				break;
+
 			default:
 				console.warn(`Relay "${this.code}": Unexpected message type from server: ${(data as Uint8Array)[0]}`)
 		}
@@ -475,6 +478,9 @@ export class LobbyDO extends DurableObject<Env> {
 			case RelayMessage.Type.DATA:
 				this.forwardData(message as RelayMessage.ClientData, ID);
 				return;
+
+			case RelayMessage.Type.PING:
+				break;
 
 			default:
 				console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
