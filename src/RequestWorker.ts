@@ -5,68 +5,100 @@ import { LobbyDO } from "./LobbyDO";
 // Request worker for handling lobby creation and joining
 export const RequestWorker = {
     // Handle incoming fetch requests
-    async fetch(request, env, ctx): Promise<Response> {
-
+    async fetch(request, env, _ctx): Promise<Response> {
         // Set up the router
-        const router = IttyRouter();
-        
+        const router = IttyRouter({
+            base: env.BASE_ROUTE || "/relay"
+        });
+
         // Apply parameter middleware
         router.all('*', withParams);
 
         // Route for creating a new lobby
-        router.get("/relay/create", async (req: IRequest) => {
+        router.get("/create", async (req: IRequest) => {
+            try {
+                // Ensure the request is a WebSocket upgrade
+                if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+                    return new Response("Expected WebSocket Upgrade", { status: 400 });
+                }
+
+                // Generate a new lobby code
+                const codeStub = env.CODE_GENERATOR_DO.getByName("singleton") as DurableObjectStub<CodeGeneratorDO>;
+                const lobbyCode = await getNewLobbyCode(codeStub, env.RELAY_D1);
+
+                // Get the Durable Object stub for the new lobby
+                const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
+
+                console.log(`Worker: Creating lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
+
+                // Forward the request to create the lobby
+                let newRequest = new Request(request);
+                newRequest.headers.set("Lobby-Code", lobbyCode);
+                newRequest.headers.set("Method", "create");
+
+                // Return the response from the lobby Durable Object
+                return await stub.fetch(newRequest);
+            } catch (e) {
+                const err = e instanceof Error ? e : new Error(String(e));
+                console.error(`Worker: Error creating lobby: ${err.message}`);
+                return new Response(err.message || "Internal Error", { status: 500 });
+            }
+        });
+
+        // Route for joining an existing lobby
+        router.get("/join/:id", withParams, async (req: IRequest) => {
             // Ensure the request is a WebSocket upgrade
             if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
             }
 
-            // Generate a new lobby code
-            const codeStub = env.CODE_GENERATOR_DO.getByName("singleton") as DurableObjectStub<CodeGeneratorDO>;
-            const lobbyCode = await codeStub.generateCode();
-
-            // Get the Durable Object stub for the new lobby
+            // Get the lobby code from the URL parameters
+            const lobbyCode = req.params.id.toUpperCase();
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
 
-            console.log(`Worker: Creating lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
-
-            if (await stub.hasConnectedServer()) {
-                return new Response(`Lobby code collision: "${lobbyCode}" already exists`, { status: 403 });
+            // Check if the code is already in use in the database
+            const existingLobby = await env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ? AND connected = 1").bind(lobbyCode).first();
+            if (!existingLobby) {
+                return new Response(`Lobby "${lobbyCode}" not found`, { status: 404 });
             }
 
-            // Forward the request to create the lobby
+            console.log(`Worker: Joining lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
+
+            // Forward the request to join the lobby
             let newRequest = new Request(request);
-            newRequest.headers.set("Lobby-Code", lobbyCode);
-            newRequest.headers.set("Method", "create");
+            newRequest.headers.set("Method", "join");
 
             // Return the response from the lobby Durable Object
             return await stub.fetch(newRequest);
         });
 
-        // Route for joining an existing lobby
-        router.get("/relay/join/:id", withParams, async (req: IRequest) => {
+        router.get("/reconnect/:id/:reconnectCode", withParams, async (req: IRequest) => {
             // Ensure the request is a WebSocket upgrade
             if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
             }
-            
-            // Get the lobby code from the URL parameters
+
+            // Get the lobby code and security code from the URL parameters
             const lobbyCode = req.params.id.toUpperCase();
+            const reconnectCode = req.params.reconnectCode;
+
+            // Get the Durable Object stub for the new lobby
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
 
-            console.log(`Worker: Joining lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
-
-            // Check if the lobby exists by seeing if a server is connected
-            if (await stub.hasConnectedServer()) {
-                // Forward the request to join the lobby
-                let newRequest = new Request(request);
-                newRequest.headers.set("Method", "join");
-
-                // Return the response from the lobby Durable Object
-                return await stub.fetch(newRequest);
-            } else {
-                // Lobby does not exist
-                return new Response(`Lobby "${lobbyCode}" not found`, { status: 404 });
+            // Check if the code is already in use in the database
+            const existingLobby = await env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ? AND connected = 0 AND reconnect_code = ?").bind(lobbyCode, reconnectCode).first();
+            if (!existingLobby) {
+                return new Response(`Lobby "${lobbyCode}" not found or already connected`, { status: 404 });
             }
+
+            console.log(`Worker: Reconnecting lobby with code "${lobbyCode}" on durable object id "${stub.id.toString()}"`);
+
+            // Forward the request to create the lobby
+            let newRequest = new Request(request);
+            newRequest.headers.set("Method", "reconnect");
+
+            // Return the response from the lobby Durable Object
+            return await stub.fetch(newRequest);
         });
 
         // Fallback for unknown routes
@@ -82,6 +114,77 @@ export const RequestWorker = {
     },
     async scheduled(cont, env, ctx): Promise<void> {
         // Scheduler gets called every 5 seconds
-        // TODO: ping and garbage collection
+        cleanupLobbies(env).catch((err) => {
+            console.error(`Worker: Error during scheduled cleanup: ${err.message}`);
+        });
+
+        sendPingsInLobbies(env).catch((err) => {
+            console.error(`Worker: Error during scheduled ping: ${err.message}`);
+        });
     }
 } satisfies ExportedHandler<Env>;
+
+async function getNewLobbyCode(generator: DurableObjectStub<CodeGeneratorDO>, db: D1Database): Promise<string> {
+    // Limit the number of attempts to avoid infinite loops
+    for (let i = 0; i < 10; i++) {
+        // Generate a new lobby code using the CodeGeneratorDO
+        const code = await generator.generateCode();
+
+        // Check if the code is already in use in the database
+        const existingLobby = await db.prepare("SELECT * FROM lobbies WHERE code = ?").bind(code).first();
+        if (existingLobby) {
+            continue; // Code is already in use, try again
+        }
+
+        // Check if the code is banned
+        const bannedCode = await db.prepare("SELECT * FROM banned_codes WHERE code = ?").bind(code).first();
+        if (bannedCode) {
+            continue; // Code is banned, try again
+        }
+
+        return code; // Code is unique and not banned, return it
+    }
+
+    throw new Error("Failed to generate a unique lobby code after multiple attempts");
+}
+
+interface LobbyRecord {
+    code: string;
+}
+
+async function cleanupLobbies(env: Env): Promise<void> {
+    // Get all lobbies from the database
+    const { results: lobbies } = await env.RELAY_D1.prepare(`
+        SELECT * FROM lobbies
+        WHERE
+            (last_updated < unixepoch() - 86400) OR 
+            (last_updated < unixepoch() - 300 AND NOT connected)
+    `).all() as { results: LobbyRecord[] };
+
+    // Delete old lobbies from the database
+    env.RELAY_D1.prepare(`
+        DELETE * FROM lobbies
+        WHERE
+            (last_updated < unixepoch() - 30) OR 
+            (last_updated < unixepoch() - 5 AND NOT connected)
+    `).run();
+
+    // Cleanup the corresponding Durable Objects
+    for (const lobby of lobbies) {
+        const code = lobby.code;
+        const stub = env.LOBBY_DO.getByName(code) as DurableObjectStub<LobbyDO>;
+        stub.reset();
+    }
+}
+
+async function sendPingsInLobbies(env: Env): Promise<void> {
+    // Get all lobbies from the database
+    const { results: lobbies } = await env.RELAY_D1.prepare("SELECT * FROM lobbies").all() as { results: LobbyRecord[] };
+
+    // Send ping messages in all lobbies to check for active connections
+    for (const lobby of lobbies) {
+        const code = lobby.code;
+        const stub = env.LOBBY_DO.getByName(code) as DurableObjectStub<LobbyDO>;
+        stub.pingRoutine();
+    }
+}

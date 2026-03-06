@@ -99,9 +99,9 @@ export class LobbyDO extends DurableObject<Env> {
 	private cleanup(): void {
 		this.websocketMap.forEach((socket, key) => {
 			const wsID = socket.deserializeAttachment() as string;
-			const lastAutoResponse = this.lastUsedTime.get(wsID)!;
+			const lastResponse = this.lastUsedTime.get(wsID)!;
 
-			if (Date.now() - lastAutoResponse > 5000) {
+			if (Date.now() - lastResponse > 15000) {
 				if (this.isSocketServer(key)) {
 					this.onServerClose(new CloseEvent("Server timed out"));
 				} else {
@@ -109,6 +109,28 @@ export class LobbyDO extends DurableObject<Env> {
 				}
 			}
 		});
+	}
+
+	reset(): void {
+		this.cleanup();
+
+		this.server = null;
+		this.peers = new Map<number, string>();
+		this.nextPeer = 0;
+		this.currentPeers = 0;
+		this.lastUsedTime = new Map<string, number>();
+		this.websocketMap = new Map<string, WebSocket>();
+
+		this.saveState();
+	}
+
+	pingRoutine(): void {
+		this.getWebSocket(this.server)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_SERVER }));
+		this.peers.forEach((peer) => {
+			this.getWebSocket(peer)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_CLIENT }));
+		});
+
+		this.cleanup();
 	}
 
 	// Handle incoming requests
@@ -126,6 +148,9 @@ export class LobbyDO extends DurableObject<Env> {
 		} else if (method === "join") {
 			// Connect the client
 			return await this.connectClient(request);
+		} else if (method === "reconnect") {
+			// Reconnect a client
+			return await this.reconnectServer(request);
 		}
 
 		// Unknown method
@@ -161,6 +186,12 @@ export class LobbyDO extends DurableObject<Env> {
 		}));
 
 		this.saveState();
+
+		// Insert the new lobby code into the database
+		const insertResult = await this.env.RELAY_D1.prepare("INSERT INTO lobbies (code) VALUES (?)").bind(this.code).run();
+		if (insertResult.error) {
+			return new Response("Database Error", { status: 500 });
+		}
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
@@ -208,6 +239,51 @@ export class LobbyDO extends DurableObject<Env> {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
+	async reconnectServer(request: Request): Promise<Response> {
+		// Require that the request is a WebSocket upgrade
+		const upgradeHeader = request.headers.get('Upgrade');
+		if (!upgradeHeader || upgradeHeader !== "websocket") {
+			return new Response("Expected WebSocket", { status: 426 });
+		}
+
+		// Check if a server is already connected
+		if (this.server !== null) {
+			return new Response("A server is already connected to this lobby", { status: 403 });
+		}
+
+		// Check database for existing lobby
+		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.code).first();
+		if (!existingLobby) {
+			return new Response(`Lobby "${this.code}" not found`, { status: 404 });
+		}
+
+		// Create a WebSocket pair
+		const { 0: client, 1: server } = new WebSocketPair();
+		
+		// Accept the server WebSocket
+		this.ctx.acceptWebSocket(server);
+		this.server = this.saveWebSocket(server);
+		console.log(`Relay "${this.code}": Server connected to lobby`);
+
+		// Send the lobby code to the server
+		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
+			type: RelayMessage.Type.CODE,
+			direction: RelayMessage.Direction.RELAY_TO_SERVER,
+			code: this.code!
+		}));
+
+		this.saveState();
+
+		// Update database to mark the lobby as connected
+		const updateResult = await this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 1 WHERE code = ?").bind(this.code).run();
+		if (updateResult.error) {
+			return new Response("Database Error", { status: 500 });
+		}
+
+		// Return the client WebSocket
+		return new Response(null, { status: 101, webSocket: client });
+	}
+
 	// Find the next available peer ID (0-31)
 	private getNextAvailablePeer(): number {
 		for (let i = 0; i < 32; i++) {
@@ -219,11 +295,6 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		return -1;
-	}
-
-	// Check if a server is connected
-	hasConnectedServer(): boolean {
-		return this.server !== null && this.getWebSocket(this.server) !== null;
 	}
 
 	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
@@ -257,9 +328,7 @@ export class LobbyDO extends DurableObject<Env> {
 			if (peerID !== null) {
 				this.onClientClose(peerID, new CloseEvent("close", { code, reason, wasClean }));
 			} else {
-				if (this.hasConnectedServer()) {
-					console.warn(`Relay "${this.code}": Received close event from unknown WebSocket`);
-				}
+				console.warn(`Relay "${this.code}": Received close event from unknown WebSocket`);
 				ws.close();
 			}
 		}
@@ -287,15 +356,13 @@ export class LobbyDO extends DurableObject<Env> {
 		console.log(`Relay "${this.code}": server disconnected`);
 		this.getWebSocket(this.server)?.close();
 
-		// Reset the lobby state
+		// Remove the server
 		this.server = null;
-		this.currentPeers = 0;
 
-		// Disconnect all connected peers
-		this.peers.forEach((peer) => {
-			this.getWebSocket(peer)?.close();
+		// Update database to mark the lobby as disconnected
+		this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 0 WHERE code = ?").bind(this.code).run().catch((err) => {
+			console.error(`Relay "${this.code}": Error updating lobby state in database: ${err.message}`);
 		});
-		this.peers.clear();
 
 		this.saveState();
 	}
@@ -331,10 +398,6 @@ export class LobbyDO extends DurableObject<Env> {
 					this.getWebSocket(peer)?.send(RelayMessage.serialize(msg));
 				else
 					console.warn(`Relay "${this.code}": Cannot send accept to invalid peer ID "${acceptMsg.id}"`);
-				break;
-
-			case RelayMessage.Type.PING:
-				this.getWebSocket(this.server)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_SERVER }));
 				break;
 
 			default:
@@ -412,9 +475,7 @@ export class LobbyDO extends DurableObject<Env> {
 			case RelayMessage.Type.DATA:
 				this.forwardData(message as RelayMessage.ClientData, ID);
 				return;
-			case RelayMessage.Type.PING:
-				this.getPeerWebSocket(ID)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_CLIENT }));
-				return;
+
 			default:
 				console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
 				return;
