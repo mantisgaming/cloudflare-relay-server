@@ -1,132 +1,113 @@
 import { DurableObject } from "cloudflare:workers";
-import { RelayMessage } from "./RelayMessage";
+
+interface LobbyState {
+	code: string | null;
+	nextPeer: number;
+}
+
+type WebsocketMetadata = {
+	key: string;
+	lastMessageTime: number;
+	lastActiveTime: number;
+	isServer: true;
+} | {
+	key: string;
+	lastMessageTime: number;
+	lastActiveTime: number;
+	isServer: false,
+	peerID: number
+};
 
 // Durable Object for relaying a WebSocket lobby between a server and multiple clients
 export class LobbyDO extends DurableObject<Env> {
-	// Lobby state
-	private code: string | null = null;
-	private server: string | null = null;
-	private peers: Map<number, string> = new Map<number, string>();
-	private nextPeer: number = 0;
-	private currentPeers: number = 0;
-	private lastUsedTime: Map<string, number> = new Map<string, number>();
+	private state: LobbyState = {
+		code: null,
+		nextPeer: 0
+	}
 
-	private websocketMap: Map<string, WebSocket> = new Map<string, WebSocket>();
+	private server: WebSocket | null = null;
+	private peers: Map<number, WebSocket> = new Map();
 
 	// Constructor
 	constructor(ctx: DurableObjectState<{}>, env: Env) {
 		super(ctx, env);
 		this.loadState();
+		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
-		ctx.getWebSockets().forEach((ws) => {
-			const id = ws.deserializeAttachment() as string | undefined;
-			if (id === undefined) {
+		for (const ws of ctx.getWebSockets()) {
+			const data = ws.deserializeAttachment() as WebsocketMetadata;
+			if (data === undefined) {
 				ws.close(1008, "Missing WebSocket attachment");
 				return;
 			}
-			this.websocketMap.set(id, ws);
-		});
+
+			if (data.isServer) {
+				if (this.server != null) {
+					console.warn("Multiple websockets marked as server");
+					ws.close(1008, "Socket appears to be duplicate server");
+				} else {
+					this.server = ws;
+				}
+			} else {
+				this.peers.set(data.peerID, ws);
+			}
+		}
 	}
 
-	// Persist the current state to storage
 	private saveState(): void {
-		this.ctx.storage.put("code", this.code);
-		this.ctx.storage.put("server", this.server);
-		this.ctx.storage.put("peers", JSON.stringify(Array.from(this.peers.entries())));
-		this.ctx.storage.put("nextPeer", this.nextPeer.toString());
-		this.ctx.storage.put("currentPeers", this.currentPeers.toString());
-		this.ctx.storage.put("lastUsedTimes", JSON.stringify(Array.from(this.lastUsedTime.entries())));
+		this.ctx.storage.put(this.state as Record<string, any>)
 	}
 
 	private async loadState(): Promise<void> {
-		await this.ctx.blockConcurrencyWhile(async () => {
-			this.code = await this.ctx.storage.get("code") ?? this.code;
-			this.server = await this.ctx.storage.get("server") ?? this.server;
-			const peersData = await this.ctx.storage.get("peers");
-			if (peersData !== undefined) {
-				this.peers = new Map<number, string>(JSON.parse(peersData as string));
-			}
-			const nextPeerData = await this.ctx.storage.get("nextPeer");
-			if (nextPeerData !== undefined) {
-				this.nextPeer = parseInt(nextPeerData as string);
-			}
-			const currentPeersData = await this.ctx.storage.get("currentPeers");
-			if (currentPeersData !== undefined) {
-				this.currentPeers = parseInt(currentPeersData as string);
-			}
-			const lastUsedTimeData = await this.ctx.storage.get("lastUsedTimes");
-			if (peersData !== undefined) {
-				this.lastUsedTime = new Map<string, number>(JSON.parse(peersData as string));
-			}
-		});
-	}
-
-	private saveWebSocket(ws: WebSocket): string {
-		const wsId = crypto.randomUUID();
-		this.websocketMap.set(wsId, ws);
-		ws.serializeAttachment(wsId);
-		this.lastUsedTime.set(wsId, Date.now());
-		return wsId;
-	}
-
-	private getWebSocket(id: string | null): WebSocket | null {
-		if (id === null) {
-			return null;
-		}
-		return this.websocketMap.get(id) ?? null;
-	}
-
-	private getPeerWebSocket(id: number): WebSocket | null {
-		const wsId = this.peers.get(id) ?? null;
-		return this.getWebSocket(wsId);
-	}
-
-	private getPeerFromWebSocket(wsID: string): number | null {
-		for (const [id, storedWsID] of this.peers.entries()) {
-			if (storedWsID === wsID) {
-				return id;
-			}
-		}
-		return null;
-	}
-
-	private isSocketServer(wsID: string): boolean {
-		return this.server === wsID;
+		Object.assign(this.state, await this.ctx.storage.get(Object.keys(this.state)));
 	}
 
 	private cleanup(): void {
-		this.websocketMap.forEach((socket, key) => {
-			const wsID = socket.deserializeAttachment() as string;
-			const lastResponse = this.lastUsedTime.get(wsID)!;
+		for (const socket of this.ctx.getWebSockets()) {
+			const socketData = socket.deserializeAttachment() as WebsocketMetadata;
+			const lastAction = socketData.lastActiveTime;
+			const lastMessage = Math.max(
+				socketData.lastMessageTime,
+				this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0
+			);
 
-			if (Date.now() - lastResponse > 15000) {
-				if (this.isSocketServer(key)) {
-					this.onServerClose(new CloseEvent("Server timed out"));
+			const now = Date.now();
+
+			if (now - lastMessage > 1000 * 15) {
+				if (socketData.isServer) {
+					this.onServerClose(socket, new CloseEvent("Server timed out"));
 				} else {
-					this.onClientClose(this.getPeerFromWebSocket(key)!, new CloseEvent("Client timed out"));
+					this.onClientClose(socket, new CloseEvent("Client timed out"));
+				}
+			} else if (now - lastAction > 1000 * 60 * 30) {
+				if (socketData.isServer) {
+					this.onServerClose(socket, new CloseEvent("Server was idle"));
+				} else {
+					this.onClientClose(socket, new CloseEvent("Client was idle"));
 				}
 			}
-		});
+		}
 	}
 
 	reset(): void {
-		this.cleanup();
-
 		this.server = null;
-		this.peers = new Map<number, string>();
-		this.nextPeer = 0;
-		this.currentPeers = 0;
-		this.lastUsedTime = new Map<string, number>();
-		this.websocketMap = new Map<string, WebSocket>();
+		this.peers = new Map();
+		this.state = {
+			code: null,
+			nextPeer: 0
+		}
+
+		for (const socket of this.ctx.getWebSockets()) {
+			socket.close(1012, "Lobby has been reset");
+		}
 
 		this.saveState();
 	}
 
 	pingRoutine(): void {
-		this.getWebSocket(this.server)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_SERVER }));
-		this.peers.forEach((peer) => {
-			this.getWebSocket(peer)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_CLIENT }));
-		});
+		for (const socket of this.ctx.getWebSockets()) {
+			socket.send("ping");
+		}
 
 		this.cleanup();
 	}
@@ -257,7 +238,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Create a WebSocket pair
 		const { 0: client, 1: server } = new WebSocketPair();
-		
+
 		// Accept the server WebSocket
 		this.ctx.acceptWebSocket(server);
 		this.server = this.saveWebSocket(server);

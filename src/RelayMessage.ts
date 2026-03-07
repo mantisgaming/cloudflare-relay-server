@@ -10,17 +10,13 @@
  * `dat` - Data  
  * `con` - Connect  
  * `dsc` - Disconnect  
- * `inf` - Relay Info  
- * `ping` - Ping request  
- * `pong` - Ping response
+ * `inf` - Relay Info
 */
 export type RelayMessageType =
     "dat" |
     "con" |
     "dsc" |
-    "inf" |
-    "ping" |
-    "pong";
+    "inf";
 
 /** Directions messages can be sent in */
 export type RelayMessageDirection =
@@ -78,20 +74,6 @@ export namespace RelayMessagePayload {
         /** Lobby code */
         code: T extends "relay-to-server" ? string : undefined;
     }
-
-    /** Ping relay message*/
-    export interface Ping<T extends RelayMessageDirection> extends Base<T> {
-        msg: "ping";
-        /** Ping send time */
-        tim: any;
-    }
-
-    /** Ping relay message*/
-    export interface Pong<T extends RelayMessageDirection> extends Base<T> {
-        msg: "pong";
-        /** Original ping send time */
-        tim: any;
-    }
 }
 
 /** Union of all message payload types */
@@ -111,18 +93,12 @@ export type RelayMessagePayload =
     RelayMessagePayload.Info<
         "relay-to-client" |
         "relay-to-server"
-    > | 
-    RelayMessagePayload.Ping<
-        RelayMessageDirection
-    > | 
-    RelayMessagePayload.Pong<
-        RelayMessageDirection
     >;
 
 /** The structure for all relay messages */
-export interface RelayMessage<T extends RelayMessagePayload.Base<D> = RelayMessagePayload, D extends RelayMessageDirection = RelayMessageDirection> {
+export type RelayMessage<T extends RelayMessagePayload.Base<D> = RelayMessagePayload, D extends RelayMessageDirection = RelayMessageDirection> = {
     /** Relay message payload */
     pld: OmitUndefined<T>;
-    /** Relay message HMAC hash for message validation */
-    chk: string;
-}
+    /** Relay message MAC digest for message validation */
+    dgs: string;
+} | "ping" | "pong";
