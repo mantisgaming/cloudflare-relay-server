@@ -2,15 +2,15 @@ import { DurableObject } from "cloudflare:workers";
 import { Bucket } from "./Bucket";
 
 type BucketMap = Map<string, Bucket.BucketData>;
-type BucketParamMap = [(key: string) => boolean, Bucket.BucketParameters][];
+type BucketParamMap = [string, Bucket.BucketParameters][];
 
 // Durable Object for generating unique lobby codes
-export class RateLimiterDO extends DurableObject<Env> {
+export class GlobalRateLimiterDO extends DurableObject<Env> {
     private readonly bucketMap: BucketMap;
     private readonly bucketParamMap: BucketParamMap;
     private readonly defaultBucketParams: Bucket.BucketParameters = {
-        capacity: 20,
-        fillRate: 60
+        capacity: 200,
+        fillRate: 600
     };
 
     private lastClean: number = Date.now();
@@ -20,55 +20,33 @@ export class RateLimiterDO extends DurableObject<Env> {
         super(ctx, env);
         this.bucketMap = new Map();
         this.bucketParamMap = [
-            [/^any:any$/.test, {
-                capacity: 500,
+            ["any", {
+                capacity: 200,
+                fillRate: 1200
+            }],
+            ["create", {
+                capacity: 200,
+                fillRate: 300
+            }],
+            ["reconnect", {
+                capacity: 200,
+                fillRate: 300
+            }],
+            ["join", {
+                capacity: 300,
                 fillRate: 600
             }],
-            [/^any:(create)|(reconnect)$/.test, {
-                capacity: 120,
-                fillRate: 60
-            }],
-            [/^any:join$/.test, {
-                capacity: 120,
-                fillRate: 120
-            }],
-            [/^any:.*$/.test, {
-                capacity: 30,
-                fillRate: 30
-            }],
-            [/^any:any$/.test, {
-                capacity: 500,
-                fillRate: 600
-            }],
-            [/^any:(create)|(reconnect)$/.test, {
-                capacity: 120,
-                fillRate: 60
-            }],
-            [/^any:join$/.test, {
-                capacity: 120,
-                fillRate: 120
-            }],
-            [/^any:.*$/.test, {
-                capacity: 30,
-                fillRate: 30
-            }],
-            [/^.*:.*$/.test, {
-                capacity: 30,
-                fillRate: 30
-            }]
         ];
     }
 
     /** Acquire permission to make a request */
-    public acquireToken(IPAddress: string, requestType: string): boolean {
+    public acquireToken(requestType: string): boolean {
         const bucketKeys: string[] = [
-            `${IPAddress}:any`,
-            `${IPAddress}:${requestType}`,
-            `any:${requestType}`,
-            `any:any`
+            "any",
+            requestType,
         ];
 
-        const buckets = bucketKeys.map<Bucket.BucketData>(this.getBucket);
+        const buckets = bucketKeys.map<Bucket.BucketData>(this.getBucket.bind(this));
 
         const now = Date.now();
 
@@ -92,7 +70,7 @@ export class RateLimiterDO extends DurableObject<Env> {
             return this.bucketMap.get(key)!;
 
         // initialize a new bucket
-        const params = this.getParamsForKey(key);
+        const params = this.getParamsForRequest(key);
         const newBucket: Bucket.BucketData = {
             params,
             state: Bucket.createDefaultState(params)
@@ -103,11 +81,11 @@ export class RateLimiterDO extends DurableObject<Env> {
         return newBucket;
     }
 
-    private getParamsForKey(key: string): Bucket.BucketParameters {
+    private getParamsForRequest(request: string): Bucket.BucketParameters {
         for (let i = 0; i < this.bucketParamMap.length; i++) {
             const [match, params] = this.bucketParamMap[i];
 
-            if (match(key))
+            if (match == request)
                 return params;
         }
 

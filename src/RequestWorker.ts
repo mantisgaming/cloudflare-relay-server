@@ -1,7 +1,8 @@
 import { IRequest, IttyRouter, withParams } from "itty-router";
 import { CodeGeneratorDO } from "./CodeGeneratorDO";
 import { LobbyDO } from "./LobbyDO";
-import { RateLimiterDO } from "./RateLimiterDO";
+import { IPRateLimiterDO } from "./IPRateLimiterDO";
+import { GlobalRateLimiterDO } from "./GlobalRateLimiterDO";
 
 // Request worker for handling lobby creation and joining
 export const RequestWorker: ExportedHandler<Env> = {
@@ -12,10 +13,16 @@ export const RequestWorker: ExportedHandler<Env> = {
             base: env.BASE_ROUTE || "/relay"
         });
 
+        // Find the shard corresponding to the IP address
         const IP = request.headers.get("CF-Connecting-IP") ?? "0.0.0.0";
+        const IPHash = new Uint32Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(IP)))[0];
+        const IPShardIndex = IPHash % env.IP_RATE_LIMITER_SHARDS;
+        const ipRateLimiter = env.IP_RATE_LIMITER_DO.getByName(String(IPShardIndex)) as DurableObjectStub<IPRateLimiterDO>;
 
-        const rateLimiter = env.RATE_LIMITER_DO.getByName("singleton") as DurableObjectStub<RateLimiterDO>;
-        rateLimiter.clean();
+        // Clean the shard
+        ipRateLimiter.clean();
+
+        const globalRateLimiter = env.GLOBAL_RATE_LIMITER_DO.getByName("singleton") as DurableObjectStub<GlobalRateLimiterDO>;
 
         // Apply parameter middleware
         router.all('*', withParams);
@@ -28,7 +35,11 @@ export const RequestWorker: ExportedHandler<Env> = {
                     return new Response("Expected WebSocket Upgrade", { status: 400 });
                 }
 
-                if (!await rateLimiter.acquireToken(IP, "create")) {
+                if (!await globalRateLimiter.acquireToken("create")) {
+                    return new Response("Request has been rate limited", { status: 429 });
+                }
+
+                if (!await ipRateLimiter.acquireToken(IP, "create")) {
                     return new Response("Request has been rate limited", { status: 429 });
                 }
 
@@ -62,7 +73,11 @@ export const RequestWorker: ExportedHandler<Env> = {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
             }
 
-            if (!await rateLimiter.acquireToken(IP, "join")) {
+            if (!await globalRateLimiter.acquireToken("join")) {
+                return new Response("Request has been rate limited", { status: 429 });
+            }
+
+            if (!await ipRateLimiter.acquireToken(IP, "join")) {
                 return new Response("Request has been rate limited", { status: 429 });
             }
 
@@ -92,7 +107,11 @@ export const RequestWorker: ExportedHandler<Env> = {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
             }
 
-            if (!await rateLimiter.acquireToken(IP, "reconnect")) {
+            if (!await globalRateLimiter.acquireToken("reconnect")) {
+                return new Response("Request has been rate limited", { status: 429 });
+            }
+
+            if (!await ipRateLimiter.acquireToken(IP, "reconnect")) {
                 return new Response("Request has been rate limited", { status: 429 });
             }
 

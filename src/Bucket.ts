@@ -88,7 +88,7 @@ export namespace Bucket {
         if (bucket.state.tokens == bucket.params.capacity)
             return;
 
-        bucket.state.lastUpdate = now ?? Date.now();
         bucket.state.tokens = getTokenCount(bucket, now);
+        bucket.state.lastUpdate = now ?? Date.now();
     }
 }

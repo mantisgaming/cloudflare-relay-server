@@ -28,7 +28,8 @@
 	"vars": {
 		"CODE_LENGTH": 4,
 		"CODE_INCREMENTER": 318211,
-		"BASE_ROUTE": "/relay"
+		"BASE_ROUTE": "/relay",
+		"IP_RATE_LIMITER_SHARDS": 1,
 	},
 	"triggers": {
 		"crons": [
@@ -68,15 +69,20 @@
 						"name": "CODE_GENERATOR_DO"
 					},
 					{
-						"class_name": "RateLimiterDO",
-						"name": "RATE_LIMITER_DO"
+						"class_name": "IPRateLimiterDO",
+						"name": "IP_RATE_LIMITER_DO"
+					},
+					{
+						"class_name": "GlobalRateLimiterDO",
+						"name": "GLOBAL_RATE_LIMITER_DO"
 					}
 				]
 			},
 			"vars": {
 				"CODE_LENGTH": 4,
 				"CODE_INCREMENTER": 318211,
-				"BASE_ROUTE": "/relay"
+				"BASE_ROUTE": "/relay",
+				"IP_RATE_LIMITER_SHARDS": 1,
 			},
 			"d1_databases": [
 				{
@@ -108,15 +114,20 @@
 						"name": "CODE_GENERATOR_DO"
 					},
 					{
-						"class_name": "RateLimiterDO",
-						"name": "RATE_LIMITER_DO"
+						"class_name": "IPRateLimiterDO",
+						"name": "IP_RATE_LIMITER_DO"
+					},
+					{
+						"class_name": "GlobalRateLimiterDO",
+						"name": "GLOBAL_RATE_LIMITER_DO"
 					}
 				]
 			},
 			"vars": {
 				"CODE_LENGTH": 4,
 				"CODE_INCREMENTER": 318211,
-				"BASE_ROUTE": "/relay"
+				"BASE_ROUTE": "/relay",
+				"IP_RATE_LIMITER_SHARDS": 1,
 			},
 			"d1_databases": [
 				{
@@ -138,8 +149,12 @@
 				"name": "CODE_GENERATOR_DO"
 			},
 			{
-				"class_name": "RateLimiterDO",
-				"name": "RATE_LIMITER_DO"
+				"class_name": "IPRateLimiterDO",
+				"name": "IP_RATE_LIMITER_DO"
+			},
+			{
+				"class_name": "GlobalRateLimiterDO",
+				"name": "GLOBAL_RATE_LIMITER_DO"
 			}
 		]
 	},
