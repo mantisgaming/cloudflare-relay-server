@@ -17,6 +17,13 @@
 				"LobbyDO",
 				"CodeGeneratorDO"
 			]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": [
+				"IPRateLimiterDO",
+				"GlobalRateLimiterDO"
+			]
 		}
 	],
 	"observability": {
