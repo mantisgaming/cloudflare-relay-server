@@ -29,15 +29,13 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Persist the current state to storage
-	private async saveState(): Promise<void> {
-		await this.ctx.blockConcurrencyWhile(async () => {
-			await this.ctx.storage.put("code", this.code);
-			await this.ctx.storage.put("server", this.server);
-			await this.ctx.storage.put("peers", JSON.stringify(Array.from(this.peers.entries())));
-			await this.ctx.storage.put("nextPeer", this.nextPeer.toString());
-			await this.ctx.storage.put("currentPeers", this.currentPeers.toString());
-			await this.ctx.storage.put("lastUsedTimes", JSON.stringify(Array.from(this.lastUsedTime.entries())));
-		});
+	private saveState(): void {
+		this.ctx.storage.put("code", this.code);
+		this.ctx.storage.put("server", this.server);
+		this.ctx.storage.put("peers", JSON.stringify(Array.from(this.peers.entries())));
+		this.ctx.storage.put("nextPeer", this.nextPeer.toString());
+		this.ctx.storage.put("currentPeers", this.currentPeers.toString());
+		this.ctx.storage.put("lastUsedTimes", JSON.stringify(Array.from(this.lastUsedTime.entries())));
 	}
 
 	private async loadState(): Promise<void> {

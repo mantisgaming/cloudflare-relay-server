@@ -66,6 +66,10 @@
 					{
 						"class_name": "CodeGeneratorDO",
 						"name": "CODE_GENERATOR_DO"
+					},
+					{
+						"class_name": "RateLimiterDO",
+						"name": "RATE_LIMITER_DO"
 					}
 				]
 			},
@@ -102,6 +106,10 @@
 					{
 						"class_name": "CodeGeneratorDO",
 						"name": "CODE_GENERATOR_DO"
+					},
+					{
+						"class_name": "RateLimiterDO",
+						"name": "RATE_LIMITER_DO"
 					}
 				]
 			},
@@ -128,6 +136,10 @@
 			{
 				"class_name": "CodeGeneratorDO",
 				"name": "CODE_GENERATOR_DO"
+			},
+			{
+				"class_name": "RateLimiterDO",
+				"name": "RATE_LIMITER_DO"
 			}
 		]
 	},

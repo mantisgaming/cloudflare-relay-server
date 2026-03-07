@@ -1,15 +1,21 @@
 import { IRequest, IttyRouter, withParams } from "itty-router";
 import { CodeGeneratorDO } from "./CodeGeneratorDO";
 import { LobbyDO } from "./LobbyDO";
+import { RateLimiterDO } from "./RateLimiterDO";
 
 // Request worker for handling lobby creation and joining
-export const RequestWorker = {
+export const RequestWorker: ExportedHandler<Env> = {
     // Handle incoming fetch requests
     async fetch(request, env, _ctx): Promise<Response> {
         // Set up the router
         const router = IttyRouter({
             base: env.BASE_ROUTE || "/relay"
         });
+
+        const IP = request.headers.get("CF-Connecting-IP") ?? "0.0.0.0";
+
+        const rateLimiter = env.RATE_LIMITER_DO.getByName("singleton") as DurableObjectStub<RateLimiterDO>;
+        rateLimiter.clean();
 
         // Apply parameter middleware
         router.all('*', withParams);
@@ -20,6 +26,10 @@ export const RequestWorker = {
                 // Ensure the request is a WebSocket upgrade
                 if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
                     return new Response("Expected WebSocket Upgrade", { status: 400 });
+                }
+
+                if (!await rateLimiter.acquireToken(IP, "create")) {
+                    return new Response("Request has been rate limited", { status: 429 });
                 }
 
                 // Generate a new lobby code
@@ -52,6 +62,10 @@ export const RequestWorker = {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
             }
 
+            if (!await rateLimiter.acquireToken(IP, "join")) {
+                return new Response("Request has been rate limited", { status: 429 });
+            }
+
             // Get the lobby code from the URL parameters
             const lobbyCode = req.params.id.toUpperCase();
             const stub = env.LOBBY_DO.getByName(lobbyCode) as DurableObjectStub<LobbyDO>;
@@ -76,6 +90,10 @@ export const RequestWorker = {
             // Ensure the request is a WebSocket upgrade
             if (req.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
                 return new Response("Expected WebSocket Upgrade", { status: 400 });
+            }
+
+            if (!await rateLimiter.acquireToken(IP, "reconnect")) {
+                return new Response("Request has been rate limited", { status: 429 });
             }
 
             // Get the lobby code and security code from the URL parameters
