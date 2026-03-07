@@ -133,6 +133,7 @@ export const RequestWorker: ExportedHandler<Env> = {
             // Forward the request to create the lobby
             let newRequest = new Request(request);
             newRequest.headers.set("Method", "reconnect");
+            newRequest.headers.set("Reconnect-Code", reconnectCode)
 
             // Return the response from the lobby Durable Object
             return await stub.fetch(newRequest);

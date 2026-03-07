@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { RelayMessage, RelayMessagePayload } from "./RelayMessage";
 
 interface LobbyState {
 	code: string | null;
@@ -16,6 +17,45 @@ type WebsocketMetadata = {
 	lastActiveTime: number;
 	isServer: false,
 	peerID: number
+};
+
+function createRandomKey(length: number): string {
+	const buffer = new Uint8Array(length);
+	crypto.getRandomValues(buffer);
+	return toHexString(buffer);
+}
+
+async function getDigest(payload: any, ...keys: Uint8Array[]): Promise<Uint8Array> {
+	const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+
+	const data = new Uint8Array(payloadBytes.length + keys.reduce((size, key) => size + key.length, 0));
+
+	data.set(payload, 0);
+	keys.reduce((offset, key) => {
+		data.set(key, offset);
+		return offset + key.length;
+	}, data.length);
+
+	return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+}
+
+function toHexString(data: Uint8Array): string {
+	return data.reduce((str, byte) => str + byte.toString(16).padStart(2, '0'), '');
+}
+
+function fromHexString(hexString: string): Uint8Array {
+	// Ensure the string has an even number of characters
+	if (hexString.length % 2 !== 0) {
+		throw new Error("Hex string must have an even number of characters");
+	}
+
+	const matches = hexString.match(/.{1,2}/g);
+
+	if (matches === null) {
+		throw new Error("Hex string failed to parse");
+	}
+
+	return new Uint8Array(matches.map((byte) => parseInt(byte, 16)));
 };
 
 // Durable Object for relaying a WebSocket lobby between a server and multiple clients
@@ -114,6 +154,8 @@ export class LobbyDO extends DurableObject<Env> {
 
 	// Handle incoming requests
 	async fetch(request: Request): Promise<Response> {
+		// TODO: add rate limiter
+
 		// Determine the method from headers
 		const method = request.headers.get("Method");
 		if (method === "create") {
@@ -137,6 +179,8 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	async connectServer(request: Request, code: string): Promise<Response> {
+		// TODO: add rate limiter
+
 		// Require that the request is a WebSocket upgrade
 		const upgradeHeader = request.headers.get('Upgrade');
 		if (!upgradeHeader || upgradeHeader !== "websocket") {
@@ -148,35 +192,59 @@ export class LobbyDO extends DurableObject<Env> {
 			return new Response("A server is already connected to this lobby", { status: 403 });
 		}
 
+		// Save the code
+		this.state.code = code;
+		this.saveState();
+
+		// Insert the new lobby code into the database
+		const insertResult = await this.env.RELAY_D1.prepare("INSERT INTO lobbies (code) VALUES (?)").bind(this.state.code).run();
+		if (insertResult.error) {
+			return new Response("Database Error", { status: 500 });
+		}
+
 		// Create a WebSocket pair
-		this.code = code;
 		const { 0: client, 1: server } = new WebSocketPair();
 
 		// Accept the server WebSocket
 		this.ctx.acceptWebSocket(server);
-		this.server = this.saveWebSocket(server);
-		console.log(`Relay "${this.code}": Server connected to lobby`);
+		this.server = server;
+
+		// Save data to websocket
+		const serverWSData: WebsocketMetadata = {
+			isServer: true,
+			key: createRandomKey(32),
+			lastActiveTime: Date.now(),
+			lastMessageTime: Date.now()
+		};
+		server.serializeAttachment(serverWSData);
 
 		// Send the lobby code to the server
-		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
-			type: RelayMessage.Type.CODE,
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			code: this.code
-		}));
+		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
+			code: this.state.code,
+			key: serverWSData.key,
+			msg: "inf"
+		};
 
-		this.saveState();
+		// Generate hmac
+		const hmac = await getDigest(infoPayload, fromHexString(this.env.HMAC_APPLICATION_SECRET), fromHexString(serverWSData.key));
+		const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-server">> = {
+			dgs: toHexString(hmac),
+			pld: infoPayload
+		};
 
-		// Insert the new lobby code into the database
-		const insertResult = await this.env.RELAY_D1.prepare("INSERT INTO lobbies (code) VALUES (?)").bind(this.code).run();
-		if (insertResult.error) {
-			return new Response("Database Error", { status: 500 });
-		}
+		// Send info to server
+		server.send(JSON.stringify(infoPacket));
+
+		// Log success
+		console.log(`Relay "${this.state.code}": Server connected to lobby`);
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	async connectClient(request: Request): Promise<Response> {
+		// TODO: add rate limiter
+
 		// Check if a server is connected
 		if (this.server === null) {
 			return new Response("No server connected to this lobby", { status: 404 });
@@ -188,41 +256,74 @@ export class LobbyDO extends DurableObject<Env> {
 			return new Response("Expected WebSocket", { status: 426 });
 		}
 
+		// Limit the number of peer connections
+		if (this.peers.size >= this.env.MAXIMUM_LOBBY_CONNECTIONS) {
+			return new Response("Lobby is full", { status: 423 })
+		}
+
 		// Get the next available peer ID
 		const id = this.getNextAvailablePeer();
-
-		// No available slots
-		if (id == -1) {
-			return new Response("No available peer slots", { status: 403 });
-		}
 
 		// Create a WebSocket pair
 		const { 0: client, 1: server } = new WebSocketPair();
 
 		// Accept the client WebSocket
 		this.ctx.acceptWebSocket(server);
-		this.peers.set(id, this.saveWebSocket(server));
-		this.currentPeers |= 1 << id;
-		console.log(`Relay "${this.code}": Client "${id}" connected to lobby`);
+		this.peers.set(id, server);
+
+		// Save data to websocket
+		const serverWSData: WebsocketMetadata = {
+			isServer: false,
+			peerID: id,
+			key: createRandomKey(32),
+			lastActiveTime: Date.now(),
+			lastMessageTime: Date.now()
+		};
+		server.serializeAttachment(serverWSData);
+
+		console.log(`Relay "${this.state.code}": Client "${id}" connected to lobby`);
 
 		// Inform the server of the new connection
-		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			type: RelayMessage.Type.CONNECT,
-			id: id
-		}));
+		const infoPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
+			msg: "con",
+			pid: id
+		};
 
-		this.saveState();
+		// Generate hmac
+		const hmac = await getDigest(infoPayload, fromHexString(this.env.HMAC_APPLICATION_SECRET), fromHexString(serverWSData.key));
+		const infoPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
+			dgs: toHexString(hmac),
+			pld: infoPayload
+		};
+
+		// Send info to server
+		server.send(JSON.stringify(infoPacket));
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	async reconnectServer(request: Request): Promise<Response> {
-		// Require that the request is a WebSocket upgrade
+		// TODO: add rate limiter
+
+		// Get headers
 		const upgradeHeader = request.headers.get('Upgrade');
+		const reconnectCode = request.headers.get('Reconnect-Code');
+		const code = request.headers.get("Lobby-Code");
+
+		// Require that the request is a WebSocket upgrade
 		if (!upgradeHeader || upgradeHeader !== "websocket") {
 			return new Response("Expected WebSocket", { status: 426 });
+		}
+
+		// Make sure a code was sent
+		if (code === null) {
+			return new Response("Code not provided", { status: 400 });
+		}
+
+		// Make sure a reconnect code was sent
+		if (reconnectCode === null) {
+			return new Response("Reconnect code not provided", { status: 400 });
 		}
 
 		// Check if a server is already connected
@@ -231,9 +332,26 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		// Check database for existing lobby
-		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.code).first();
+		const existingLobby = await this.env.RELAY_D1.prepare(`
+			SELECT * FROM lobbies
+			WHERE code = ? AND reconnect_code = ?
+		`).bind(code).bind(reconnectCode).first();
+
 		if (!existingLobby) {
-			return new Response(`Lobby "${this.code}" not found`, { status: 404 });
+			return new Response(`Lobby "${code}" not found or invalid code provided`, { status: 404 });
+		}
+
+		if (this.state.code === null) {
+			this.state.code = code;
+		} else if (this.state.code != code) {
+			console.warn(`Lobby tried to reconnect to ${code} but lobby already belongs to ${this.state.code}`);
+			return new Response(`Lobby belongs to different code`, { status: 500 });
+		}
+
+		// Update database to mark the lobby as connected
+		const updateResult = await this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 1 WHERE code = ?").bind(this.state.code).run();
+		if (updateResult.error) {
+			return new Response("Database Error", { status: 500 });
 		}
 
 		// Create a WebSocket pair
@@ -241,39 +359,46 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Accept the server WebSocket
 		this.ctx.acceptWebSocket(server);
-		this.server = this.saveWebSocket(server);
-		console.log(`Relay "${this.code}": Server connected to lobby`);
+		this.server = server;
+
+		// Save data to websocket
+		const serverWSData: WebsocketMetadata = {
+			isServer: true,
+			key: createRandomKey(32),
+			lastActiveTime: Date.now(),
+			lastMessageTime: Date.now()
+		};
+		server.serializeAttachment(serverWSData);
 
 		// Send the lobby code to the server
-		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
-			type: RelayMessage.Type.CODE,
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			code: this.code!
-		}));
+		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
+			code: this.state.code,
+			key: serverWSData.key,
+			msg: "inf"
+		};
 
-		this.saveState();
+		// Generate hmac
+		const hmac = await getDigest(infoPayload, fromHexString(this.env.HMAC_APPLICATION_SECRET), fromHexString(serverWSData.key));
+		const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-server">> = {
+			dgs: toHexString(hmac),
+			pld: infoPayload
+		};
 
-		// Update database to mark the lobby as connected
-		const updateResult = await this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 1 WHERE code = ?").bind(this.code).run();
-		if (updateResult.error) {
-			return new Response("Database Error", { status: 500 });
-		}
+		// Send info to server
+		server.send(JSON.stringify(infoPacket));
+
+		// Log success
+		console.log(`Relay "${this.state.code}": Server connected to lobby`);
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
-	// Find the next available peer ID (0-31)
+	/** Get the next available peer ID */
 	private getNextAvailablePeer(): number {
-		for (let i = 0; i < 32; i++) {
-			let id = (this.nextPeer + i) % 32;
-			if ((this.currentPeers >>> id & 0x1) === 0) {
-				this.nextPeer = (id + 1) % 32;
-				return id;
-			}
-		}
-
-		return -1;
+		const peer = this.state.nextPeer++;
+		this.saveState();
+		return peer;
 	}
 
 	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {

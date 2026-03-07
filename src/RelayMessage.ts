@@ -56,7 +56,7 @@ export namespace RelayMessagePayload {
     export interface Connect<T extends "relay-to-server" | "server-to-relay" | "relay-to-client"> extends Base<T> {
         msg: "con";
         /** ID number of the relevant peer */
-        pid: T extends "relay-to-client" ? never : undefined;
+        pid: T extends "relay-to-client" ? undefined : number;
     }
 
     /** Disconnect relay message */
@@ -101,4 +101,6 @@ export type RelayMessage<T extends RelayMessagePayload.Base<D> = RelayMessagePay
     pld: OmitUndefined<T>;
     /** Relay message MAC digest for message validation */
     dgs: string;
-} | "ping" | "pong";
+};
+
+export type RelayPacket = RelayMessage[] | "ping" | "pong";
