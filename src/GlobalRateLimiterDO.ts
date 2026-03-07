@@ -21,20 +21,20 @@ export class GlobalRateLimiterDO extends DurableObject<Env> {
         this.bucketMap = new Map();
         this.bucketParamMap = [
             ["any", {
-                capacity: 200,
-                fillRate: 1200
+                capacity: env.RATE_LIMITER_GLOBAL_ANY_CAPACITY,
+                fillRate: env.RATE_LIMITER_GLOBAL_ANY_RATE
             }],
             ["create", {
-                capacity: 200,
-                fillRate: 300
+                capacity: env.RATE_LIMITER_GLOBAL_CREATE_CAPACITY,
+                fillRate: env.RATE_LIMITER_GLOBAL_CREATE_RATE
             }],
             ["reconnect", {
-                capacity: 200,
-                fillRate: 300
+                capacity: env.RATE_LIMITER_GLOBAL_RECONNECT_CAPACITY,
+                fillRate: env.RATE_LIMITER_GLOBAL_RECONNECT_RATE
             }],
             ["join", {
-                capacity: 300,
-                fillRate: 600
+                capacity: env.RATE_LIMITER_GLOBAL_JOIN_CAPACITY,
+                fillRate: env.RATE_LIMITER_GLOBAL_JOIN_RATE
             }],
         ];
     }

@@ -21,20 +21,20 @@ export class IPRateLimiterDO extends DurableObject<Env> {
         this.bucketMap = new Map();
         this.bucketParamMap = [
             ["any", {
-                capacity: 20,
-                fillRate: 120
+                capacity: env.RATE_LIMITER_IP_ANY_CAPACITY,
+                fillRate: env.RATE_LIMITER_IP_ANY_RATE
             }],
             ["create", {
-                capacity: 20,
-                fillRate: 30
+                capacity: env.RATE_LIMITER_IP_CREATE_CAPACITY,
+                fillRate: env.RATE_LIMITER_IP_CREATE_RATE
             }],
             ["reconnect", {
-                capacity: 20,
-                fillRate: 30
+                capacity: env.RATE_LIMITER_IP_RECONNECT_CAPACITY,
+                fillRate: env.RATE_LIMITER_IP_RECONNECT_RATE
             }],
             ["join", {
-                capacity: 30,
-                fillRate: 60
+                capacity: env.RATE_LIMITER_IP_JOIN_CAPACITY,
+                fillRate: env.RATE_LIMITER_IP_JOIN_RATE
             }],
         ];
     }
