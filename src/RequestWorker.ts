@@ -133,6 +133,7 @@ export const RequestWorker: ExportedHandler<Env> = {
             // Forward the request to create the lobby
             let newRequest = new Request(request);
             newRequest.headers.set("Method", "reconnect");
+            newRequest.headers.set("Reconnect-Code", reconnectCode)
 
             // Return the response from the lobby Durable Object
             return await stub.fetch(newRequest);
@@ -190,7 +191,7 @@ interface LobbyRecord {
 }
 
 async function cleanupLobbies(env: Env): Promise<void> {
-    // Get all lobbies from the database
+    // Get old lobbies
     const { results: lobbies } = await env.RELAY_D1.prepare(`
         SELECT * FROM lobbies
         WHERE
@@ -219,7 +220,7 @@ async function cleanupLobbies(env: Env): Promise<void> {
 
 async function sendPingsInLobbies(env: Env): Promise<void> {
     // Get all lobbies from the database
-    const { results: lobbies } = await env.RELAY_D1.prepare("SELECT * FROM lobbies").all() as { results: LobbyRecord[] };
+    const { results: lobbies } = await env.RELAY_D1.prepare("SELECT *, unixepoch() FROM lobbies").all() as { results: LobbyRecord[] };
 
     // Send ping messages in all lobbies to check for active connections
     for (const lobby of lobbies) {
