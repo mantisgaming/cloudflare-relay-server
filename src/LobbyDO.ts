@@ -165,44 +165,26 @@ export class LobbyDO extends DurableObject<Env> {
 			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
 		}
 
-		ctx.blockConcurrencyWhile(this.loadState.bind(this));
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
-		for (const ws of ctx.getWebSockets()) {
-			const data = ws.deserializeAttachment() as WebsocketMetadata;
-			if (data === undefined) {
-				ws.close(1008, "Missing WebSocket attachment");
-				return;
-			}
-
-			if (data.isServer) {
-				if (this.server != null) {
-					console.warn("Multiple websockets marked as server");
-					ws.close(1008, "Socket appears to be duplicate server");
-				} else {
-					this.server = ws;
-				}
-			} else {
-				this.peers.set(data.peerID, ws);
-			}
-		}
-
-		// Update database with lobby connection state
-		env.RELAY_D1.prepare(`
-			UPDATE lobbies
-			SET connected = ?
-			WHERE code = ?
-		`).bind(this.server === null ? 0 : 1, this.state.code).run();
+		ctx.blockConcurrencyWhile((async () => {
+			await this.loadState.bind(this);
+			this.refreshSockets();
+		}).bind(this));
 	}
 
 	/** Save the state of the durable object */
 	private saveState(): void {
-		this.ctx.storage.put(this.state as Record<string, any>)
+		this.ctx.storage.put("state", this.state)
 	}
 
 	/** Load the state of the durable object */
 	private async loadState(): Promise<void> {
-		Object.assign(this.state, await this.ctx.storage.get(Object.keys(this.state)));
+		const loadedState = await this.ctx.storage.get("state") as LobbyState
+		this.state = {
+			...this.state,
+			...loadedState
+		};
 	}
 
 	/** Remove any websockets that have not responded recently */
@@ -230,11 +212,49 @@ export class LobbyDO extends DurableObject<Env> {
 			}
 		}
 
+		this.refreshSockets();
+
 		// If the lobby has been removed from the database, it should be reset
 		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.state.code).all();
 		if (!existingLobby) {
 			this.reset();
 		}
+	}
+
+	private refreshSockets(): void {
+		this.server = null;
+		this.peers = new Map();
+
+		for (const ws of this.ctx.getWebSockets()) {
+			const data = ws.deserializeAttachment() as WebsocketMetadata;
+			if (data === undefined) {
+				ws.close(1008, "Missing WebSocket attachment");
+				return;
+			}
+
+			if (data.isServer) {
+				if (this.server != null) {
+					console.warn("Multiple websockets marked as server");
+					ws.close(1008, "Socket appears to be duplicate server");
+				} else {
+					this.server = ws;
+				}
+			} else {
+				this.peers.set(data.peerID, ws);
+			}
+		}
+
+		if (this.state.code === null)
+			return;
+
+		const connectedInt = this.server === null ? 0 : 1;
+
+		// Update database with lobby connection state
+		this.env.RELAY_D1.prepare(`
+			UPDATE lobbies
+			SET connected = ?
+			WHERE code = ? AND connected != ?
+		`).bind(connectedInt, this.state.code, connectedInt).run();
 	}
 
 	/** Reset the durable object */
@@ -258,7 +278,9 @@ export class LobbyDO extends DurableObject<Env> {
 		this.saveState();
 	}
 
-	pingRoutine(): void {
+	async pingRoutine(): Promise<void> {
+		await this.ctx.blockConcurrencyWhile(this.loadState.bind(this));
+
 		for (const socket of this.ctx.getWebSockets()) {
 			socket.send("ping");
 		}
