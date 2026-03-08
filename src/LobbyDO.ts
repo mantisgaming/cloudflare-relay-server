@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { OmitUndefined, RelayMessage, RelayMessageFromClient, RelayMessageFromServer, RelayMessagePayload } from "./RelayMessage";
+import { createMessageDigest, createRandomKey, OmitUndefined, RelayMessage, RelayMessageFromClient, RelayMessageFromServer, RelayMessagePayload, verifyMessageDigest } from "./RelayMessage";
 import { Bucket } from "./Bucket";
 
 interface LobbyState {
@@ -32,52 +32,6 @@ type WebsocketMetadata = {
 			peerID: number
 		}
 	);
-
-function createRandomKey(length: number): string {
-	const buffer = new Uint8Array(length);
-	crypto.getRandomValues(buffer);
-	return toHexString(buffer);
-}
-
-async function createMessageDigest(payload: any, ...keys: string[]): Promise<string> {
-	const binaryKeys = keys.map(fromHexString);
-	const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
-
-	const data = new Uint8Array(payloadBytes.length + binaryKeys.reduce((size, key) => size + key.length, 0));
-
-	data.set(payloadBytes, 0);
-	binaryKeys.reduce((offset, key) => {
-		data.set(key, offset);
-		return offset + key.length;
-	}, payloadBytes.length);
-
-	return toHexString(new Uint8Array(await crypto.subtle.digest("SHA-256", data))).substring(0, 8);
-}
-
-async function verifyMessageDigest(message: RelayMessage, ...keys: string[]): Promise<boolean> {
-	const calculatedDigest = await createMessageDigest(message.pld, ...keys);
-	const receivedDigest = message.dgs;
-	return calculatedDigest === receivedDigest;
-}
-
-function toHexString(data: Uint8Array): string {
-	return data.reduce((str, byte) => str + byte.toString(16).padStart(2, '0'), '');
-}
-
-function fromHexString(hexString: string): Uint8Array {
-	// Ensure the string has an even number of characters
-	if (hexString.length % 2 !== 0) {
-		throw new Error("Hex string must have an even number of characters");
-	}
-
-	const matches = hexString.match(/.{1,2}/g);
-
-	if (matches === null) {
-		throw new Error("Hex string failed to parse");
-	}
-
-	return new Uint8Array(matches.map((byte) => parseInt(byte, 16)));
-};
 
 // Durable Object for relaying a WebSocket lobby between a server and multiple clients
 export class LobbyDO extends DurableObject<Env> {
