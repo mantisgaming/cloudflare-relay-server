@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { createMessageDigest, createRandomKey, OmitUndefined, RelayMessage, RelayMessageFromClient, RelayMessageFromServer, RelayMessagePayload, verifyMessageDigest } from "./RelayMessage";
+import { createMessageDigest, createRandomKey, OmitUndefined, RelayMessage, RelayMessagePayload, verifyMessageDigest } from "./RelayMessage";
 import { Bucket } from "./Bucket";
 
 interface LobbyState {
@@ -326,10 +326,12 @@ export class LobbyDO extends DurableObject<Env> {
 			msg: "inf"
 		};
 
+		const stringPayload = JSON.stringify(infoPayload);
+
 		// Create packet
-		const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-server">> = {
-			dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
-			pld: infoPayload
+		const infoPacket: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			pld: stringPayload
 		};
 
 		// Send info to server
@@ -390,20 +392,24 @@ export class LobbyDO extends DurableObject<Env> {
 
 		console.log(`Relay "${this.state.code}": Client "${id}" connected to lobby`);
 
+		const serverWSData: WebsocketMetadata = this.server.deserializeAttachment();
+
 		// Inform the server of the new connection
 		const connectPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
 			msg: "con",
 			pid: id
 		};
 
+		const stringPayload = JSON.stringify(connectPayload);
+
 		// Create packet
-		const connectPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
-			dgs: await createMessageDigest(connectPayload, this.env.HMAC_APPLICATION_SECRET, peerWSData.key),
-			pld: connectPayload
+		const connectPacket: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			pld: stringPayload
 		};
 
 		// Send info to server
-		server.send(JSON.stringify([connectPacket]));
+		this.server.send(JSON.stringify([connectPacket]));
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
@@ -490,13 +496,15 @@ export class LobbyDO extends DurableObject<Env> {
 			msg: "inf"
 		};
 
+		const stringPayload = JSON.stringify(infoPayload);
+
 		// Create Packet
-		const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-server">> = {
-			dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
-			pld: infoPayload
+		const infoPacket: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			pld: stringPayload
 		};
 
-		const connectionPackets: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">>[] = [];
+		const connectionPackets: RelayMessage[] = [];
 
 		for (const [pid, ws] of this.peers.entries()) {
 			// Inform the server of the new connection
@@ -505,10 +513,12 @@ export class LobbyDO extends DurableObject<Env> {
 				pid: pid
 			};
 
+			const stringPayload = JSON.stringify(connectPayload);
+
 			// Create packet
-			const connectPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
-				dgs: await createMessageDigest(connectPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
-				pld: connectPayload
+			const connectPacket: RelayMessage = {
+				dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+				pld: stringPayload
 			};
 
 			// Add to list of packets
@@ -597,9 +607,9 @@ export class LobbyDO extends DurableObject<Env> {
 
 			// Call corresponding event handler
 			if (wsData.isServer) {
-				this.onServerMessage(messageData as RelayMessageFromServer);
+				this.onServerMessage(messageData);
 			} else {
-				this.onClientMessage(wsData.peerID, messageData as RelayMessageFromClient);
+				this.onClientMessage(wsData.peerID, messageData);
 			}
 		}
 	}
@@ -639,20 +649,22 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Handle messages from the server
-	private async onServerMessage(message: RelayMessageFromServer): Promise<void> {
+	private async onServerMessage(message: RelayMessage): Promise<void> {
+		const payload: RelayMessagePayload = JSON.parse(message.pld);
+
 		// Handle the message based on its type
-		switch (message.pld.msg) {
+		switch (payload.msg) {
 			case "dat":
-				this.forwardDataFromServer(message as any);
+				this.forwardDataFromServer(payload);
 				break;
 
 			case "dsc":
-				this.kickClient(message.pld.pid);
+				this.kickClient(payload.pid);
 				break;
 
 			case "con":
 				// Inform the client of the accepted connection
-				const clientID = message.pld.pid;
+				const clientID = payload.pid;
 				const clientWS = this.peers.get(clientID);
 
 				// Check that the client exists
@@ -670,10 +682,12 @@ export class LobbyDO extends DurableObject<Env> {
 					key: clientWSData.key
 				};
 
+				const stringPayload = JSON.stringify(infoPayload);
+
 				// Create Packet
-				const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-client">> = {
-					dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, clientWSData.key),
-					pld: infoPayload
+				const infoPacket: RelayMessage = {
+					dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, clientWSData.key),
+					pld: stringPayload
 				};
 
 				// Send Packet
@@ -681,7 +695,7 @@ export class LobbyDO extends DurableObject<Env> {
 				break;
 
 			default:
-				console.warn(`Relay "${this.state.code}": Unexpected message type from server: ${message.pld.msg}`)
+				console.warn(`Relay "${this.state.code}": Unexpected message type from server: ${payload.msg}`)
 		}
 	}
 
@@ -725,10 +739,12 @@ export class LobbyDO extends DurableObject<Env> {
 			pid: pid
 		};
 
+		const stringPayload = JSON.stringify(payload);
+
 		// Create disconnect message
-		const message: RelayMessage<typeof payload> = {
-			pld: payload,
-			dgs: await createMessageDigest(payload, this.env.HMAC_APPLICATION_SECRET, serverData.key)
+		const message: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key),
+			pld: stringPayload
 		};
 
 		// Send disconnect message
@@ -736,11 +752,13 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Handle messages from a client
-	private onClientMessage(pid: number, message: RelayMessageFromClient): void {
+	private onClientMessage(pid: number, message: RelayMessage): void {
+		const payload: RelayMessagePayload = JSON.parse(message.pld);
+
 		// Handle the message based on its type
-		switch (message.pld.msg) {
+		switch (payload.msg) {
 			case "dat":
-				this.forwardDataFromClient(pid, message as any);
+				this.forwardDataFromClient(pid, payload);
 				break;
 
 			default:
@@ -750,23 +768,25 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Forward data from a server to one or more clients
-	private async forwardDataFromServer(srcMessage: RelayMessage<RelayMessagePayload.Data<"server-to-relay">>): Promise<void> {
+	private async forwardDataFromServer(payload: RelayMessagePayload.Data<"server-to-relay">): Promise<void> {
 		for (const [pid, socket] of this.peers) {
 			// Only send messages to intended peers
-			if (!srcMessage.pld.dst.includes(pid))
+			if (!payload.dst.includes(pid))
 				continue;
 
 			const peerData = socket.deserializeAttachment() as WebsocketMetadata;
 
 			// Create data payload
-			const payload: OmitUndefined<RelayMessagePayload.Data<"relay-to-client">> = {
+			const newPayload: OmitUndefined<RelayMessagePayload.Data<"relay-to-client">> = {
 				msg: "dat",
-				dat: srcMessage.pld.dat
+				dat: payload.dat
 			};
 
-			const message: RelayMessage<RelayMessagePayload.Data<"relay-to-client">> = {
-				pld: payload,
-				dgs: await createMessageDigest(payload, this.env.HMAC_APPLICATION_SECRET, peerData.key)
+			const stringPayload = JSON.stringify(newPayload);
+
+			const message: RelayMessage = {
+				dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, peerData.key),
+				pld: stringPayload
 			}
 
 			socket.send(JSON.stringify([message]));
@@ -774,7 +794,7 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Forward data from a client to the server
-	private async forwardDataFromClient(pid: number, srcMessage: RelayMessage<RelayMessagePayload.Data<"client-to-relay">>): Promise<void> {
+	private async forwardDataFromClient(pid: number, payload: RelayMessagePayload.Data<"client-to-relay">): Promise<void> {
 		// Ignore message if the server is not connected
 		if (this.server === null) {
 			return;
@@ -784,16 +804,18 @@ export class LobbyDO extends DurableObject<Env> {
 		const serverData = this.server.deserializeAttachment() as WebsocketMetadata;
 
 		// Create data payload
-		const payload: OmitUndefined<RelayMessagePayload.Data<"relay-to-server">> = {
+		const newPayload: OmitUndefined<RelayMessagePayload.Data<"relay-to-server">> = {
 			msg: "dat",
 			src: pid,
-			dat: srcMessage.pld.dat
+			dat: payload.dat
 		};
 
+		const stringPayload = JSON.stringify(newPayload);
+
 		// Create data message
-		const message: RelayMessage<typeof payload> = {
-			pld: payload,
-			dgs: await createMessageDigest(payload, this.env.HMAC_APPLICATION_SECRET, serverData.key)
+		const message: RelayMessage = {
+			pld: stringPayload,
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key)
 		};
 
 		// Send data message

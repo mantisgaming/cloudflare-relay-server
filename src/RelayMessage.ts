@@ -105,38 +105,12 @@ export type RelayMessagePayload =
     >;
 
 /** The structure for all relay messages */
-export type RelayMessage<T extends RelayMessagePayload.Base<D> = RelayMessagePayload, D extends RelayMessageDirection = RelayMessageDirection> = {
+export type RelayMessage = {
     /** Relay message payload */
-    pld: OmitUndefined<T>;
+    pld: string;
     /** Relay message MAC digest for message validation */
     dgs: string;
 };
-
-export type RelayMessageFromServer = RelayMessage<
-    RelayMessagePayload.Data<"server-to-relay"> |
-    RelayMessagePayload.Connect<"server-to-relay"> |
-    RelayMessagePayload.Disconnect<"server-to-relay"> |
-    RelayMessagePayload.Unknown<"server-to-relay">
->;
-
-export type RelayMessageFromClient = RelayMessage<
-    RelayMessagePayload.Data<"client-to-relay"> |
-    RelayMessagePayload.Unknown<"client-to-relay">
->;
-
-export type RelayMessageToServer = RelayMessage<
-    RelayMessagePayload.Data<"relay-to-server"> |
-    RelayMessagePayload.Connect<"relay-to-server"> |
-    RelayMessagePayload.Disconnect<"relay-to-server"> |
-    RelayMessagePayload.Info<"relay-to-server"> |
-    RelayMessagePayload.Unknown<"relay-to-server">
->;
-
-export type RelayMessageToClient = RelayMessage<
-    RelayMessagePayload.Data<"relay-to-client"> |
-    RelayMessagePayload.Info<"relay-to-client"> |
-    RelayMessagePayload.Unknown<"relay-to-client">
->;
 
 export function createRandomKey(length: number): string {
     const buffer = new Uint8Array(length);
@@ -144,9 +118,9 @@ export function createRandomKey(length: number): string {
     return toHexString(buffer);
 }
 
-export async function createMessageDigest(payload: any, ...keys: string[]): Promise<string> {
+export async function createMessageDigest(payload: string, ...keys: string[]): Promise<string> {
     const binaryKeys = keys.map(fromHexString);
-    const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+    const payloadBytes = new TextEncoder().encode(payload);
 
     const data = new Uint8Array(payloadBytes.length + binaryKeys.reduce((size, key) => size + key.length, 0));
 
@@ -156,7 +130,9 @@ export async function createMessageDigest(payload: any, ...keys: string[]): Prom
         return offset + key.length;
     }, payloadBytes.length);
 
-    return toHexString(new Uint8Array(await crypto.subtle.digest("SHA-256", data))).substring(0, 8);
+    const result = toHexString(new Uint8Array(await crypto.subtle.digest("SHA-256", data)));
+
+    return result.substring(0, 8);
 }
 
 export async function verifyMessageDigest(message: RelayMessage, ...keys: string[]): Promise<boolean> {
