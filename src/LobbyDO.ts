@@ -51,7 +51,7 @@ async function createMessageDigest(payload: any, ...keys: string[]): Promise<str
 		return offset + key.length;
 	}, payloadBytes.length);
 
-	return toHexString(new Uint8Array(await crypto.subtle.digest("SHA-256", data)));
+	return toHexString(new Uint8Array(await crypto.subtle.digest("SHA-256", data))).substring(0, 8);
 }
 
 async function verifyMessageDigest(message: RelayMessage, ...keys: string[]): Promise<boolean> {
