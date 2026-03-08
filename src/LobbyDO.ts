@@ -1,10 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { OmitUndefined, RelayMessage, RelayMessageFromClient, RelayMessageFromServer, RelayMessagePayload } from "./RelayMessage";
+import { Bucket } from "./Bucket";
 
 interface LobbyState {
 	code: string | null;
 	nextPeer: number;
 	lastCleanup: number;
+	requestBucket: Bucket.BucketState;
+	joinBucket: Bucket.BucketState;
+	connectBucket: Bucket.BucketState;
+	reconnectBucket: Bucket.BucketState;
 }
 
 type WebsocketMetadata = {
@@ -16,6 +21,8 @@ type WebsocketMetadata = {
 	lastActiveTime: number;
 	/** Whether or not the websocket is a server host */
 	isServer: boolean;
+	/** Message rate limiter bucket */
+	bucket: Bucket.BucketState
 } & (
 		{
 			isServer: true;
@@ -74,18 +81,90 @@ function fromHexString(hexString: string): Uint8Array {
 
 // Durable Object for relaying a WebSocket lobby between a server and multiple clients
 export class LobbyDO extends DurableObject<Env> {
-	private state: LobbyState = {
-		code: null,
-		nextPeer: 0,
-		lastCleanup: Date.now()
-	}
+	private state: LobbyState;
 
 	private server: WebSocket | null = null;
 	private peers: Map<number, WebSocket> = new Map();
 
+	private readonly serverBucketParams: Bucket.BucketParameters;
+	private readonly peerBucketParams: Bucket.BucketParameters;
+	private readonly requestBucketParams: Bucket.BucketParameters;
+	private readonly joinBucketParams: Bucket.BucketParameters;
+	private readonly connectBucketParams: Bucket.BucketParameters;
+	private readonly reconnectBucketParams: Bucket.BucketParameters;
+
+	private get RequestBucket(): Bucket.BucketData {
+		return {
+			params: this.requestBucketParams,
+			state: this.state.requestBucket
+		};
+	}
+
+	private get JoinBucket(): Bucket.BucketData {
+		return {
+			params: this.joinBucketParams,
+			state: this.state.joinBucket
+		};
+	}
+
+	private get ConnectBucket(): Bucket.BucketData {
+		return {
+			params: this.connectBucketParams,
+			state: this.state.connectBucket
+		};
+	}
+
+	private get ReconnectBucket(): Bucket.BucketData {
+		return {
+			params: this.reconnectBucketParams,
+			state: this.state.reconnectBucket
+		};
+	}
+
 	// Constructor
 	constructor(ctx: DurableObjectState<{}>, env: Env) {
 		super(ctx, env);
+
+		this.serverBucketParams = {
+			capacity: env.RATE_LIMITER_SERVER_MESSAGE_CAPACITY,
+			fillRate: env.RATE_LIMITER_SERVER_MESSAGE_RATE
+		}
+
+		this.peerBucketParams = {
+			capacity: env.RATE_LIMITER_CLIENT_MESSAGE_CAPACITY,
+			fillRate: env.RATE_LIMITER_CLIENT_MESSAGE_RATE
+		}
+
+		this.requestBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_REQUEST_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_REQUEST_RATE
+		}
+
+		this.joinBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_JOIN_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_JOIN_RATE
+		}
+
+		this.connectBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_CONNECT_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_CONNECT_RATE
+		}
+
+		this.reconnectBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_RECONNECT_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_RECONNECT_RATE
+		}
+
+		this.state = {
+			code: null,
+			nextPeer: 0,
+			lastCleanup: Date.now(),
+			requestBucket: Bucket.createDefaultState(this.requestBucketParams),
+			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
+			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
+			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
+		}
+
 		this.loadState();
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
@@ -165,7 +244,11 @@ export class LobbyDO extends DurableObject<Env> {
 		this.state = {
 			code: null,
 			nextPeer: 0,
-			lastCleanup: Date.now()
+			lastCleanup: Date.now(),
+			requestBucket: Bucket.createDefaultState(this.requestBucketParams),
+			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
+			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
+			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
 		}
 
 		for (const socket of this.ctx.getWebSockets()) {
@@ -185,7 +268,13 @@ export class LobbyDO extends DurableObject<Env> {
 
 	// Handle incoming requests
 	async fetch(request: Request): Promise<Response> {
-		// TODO: add rate limiter
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.RequestBucket);
+		this.saveState();
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
 
 		// Determine the method from headers
 		const method = request.headers.get("Method");
@@ -210,7 +299,13 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	async connectServer(request: Request, code: string): Promise<Response> {
-		// TODO: add rate limiter
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.ConnectBucket);
+		this.saveState();
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
 
 		// Require that the request is a WebSocket upgrade
 		const upgradeHeader = request.headers.get('Upgrade');
@@ -245,7 +340,8 @@ export class LobbyDO extends DurableObject<Env> {
 			isServer: true,
 			key: createRandomKey(32),
 			lastActiveTime: Date.now(),
-			lastMessageTime: Date.now()
+			lastMessageTime: Date.now(),
+			bucket: Bucket.createDefaultState(this.serverBucketParams)
 		};
 		server.serializeAttachment(serverWSData);
 
@@ -273,7 +369,13 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	async connectClient(request: Request): Promise<Response> {
-		// TODO: add rate limiter
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.JoinBucket);
+		this.saveState();
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
 
 		// Check if a server is connected
 		if (this.server === null) {
@@ -302,14 +404,15 @@ export class LobbyDO extends DurableObject<Env> {
 		this.peers.set(id, server);
 
 		// Save data to websocket
-		const serverWSData: WebsocketMetadata = {
+		const peerWSData: WebsocketMetadata = {
 			isServer: false,
 			peerID: id,
 			key: createRandomKey(32),
 			lastActiveTime: Date.now(),
-			lastMessageTime: Date.now()
+			lastMessageTime: Date.now(),
+			bucket: Bucket.createDefaultState(this.peerBucketParams)
 		};
-		server.serializeAttachment(serverWSData);
+		server.serializeAttachment(peerWSData);
 
 		console.log(`Relay "${this.state.code}": Client "${id}" connected to lobby`);
 
@@ -321,7 +424,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Create packet
 		const connectPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
-			dgs: await createMessageDigest(connectPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			dgs: await createMessageDigest(connectPayload, this.env.HMAC_APPLICATION_SECRET, peerWSData.key),
 			pld: connectPayload
 		};
 
@@ -333,7 +436,13 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	async reconnectServer(request: Request): Promise<Response> {
-		// TODO: add rate limiter
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.ReconnectBucket);
+		this.saveState();
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
 
 		// Get headers
 		const upgradeHeader = request.headers.get('Upgrade');
@@ -395,7 +504,8 @@ export class LobbyDO extends DurableObject<Env> {
 			isServer: true,
 			key: createRandomKey(32),
 			lastActiveTime: Date.now(),
-			lastMessageTime: Date.now()
+			lastMessageTime: Date.now(),
+			bucket: Bucket.createDefaultState(this.serverBucketParams)
 		};
 		server.serializeAttachment(serverWSData);
 
@@ -453,6 +563,7 @@ export class LobbyDO extends DurableObject<Env> {
 		// Get the websocket data and update its last active time
 		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
 		wsData.lastActiveTime = Date.now();
+
 		ws.serializeAttachment(wsData);
 
 		// Run cleanup routine
@@ -464,6 +575,12 @@ export class LobbyDO extends DurableObject<Env> {
 			return;
 		}
 
+		// Reject messages that are too big
+		if (new TextEncoder().encode(message).length >= this.env.MAXIMUM_MESSAGE_SIZE * 1024) {
+			ws.close(1009, `Message Over ${this.env.MAXIMUM_MESSAGE_SIZE}KB`);
+			return;
+		}
+
 		// Respond to ping message
 		if (message === "ping") {
 			ws.send("pong");
@@ -472,6 +589,25 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Ignore pong message
 		if (message === "pong") {
+			return;
+		}
+
+		// Check rate limiter
+		const pass = Bucket.acquireToken(
+			{
+				state: wsData.bucket,
+				params: wsData.isServer ?
+					this.serverBucketParams :
+					this.peerBucketParams
+			},
+			wsData.lastActiveTime
+		);
+
+		// Save rate limiter state
+		ws.serializeAttachment(wsData);
+
+		// If rate limiter fails ignore messages
+		if (!pass) {
 			return;
 		}
 
