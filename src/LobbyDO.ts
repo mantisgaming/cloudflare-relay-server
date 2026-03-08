@@ -165,7 +165,7 @@ export class LobbyDO extends DurableObject<Env> {
 			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
 		}
 
-		this.loadState();
+		ctx.blockConcurrencyWhile(this.loadState.bind(this));
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
 		for (const ws of ctx.getWebSockets()) {
@@ -641,10 +641,10 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Call corresponding event handler
 		if (wsData.isServer) {
-			console.log(`Relay "${this.state.code}": Server websocket closed: ${reason}`);
+			console.log(`Relay "${this.state.code}": Server websocket closed${reason ? ": " + reason : ""}`);
 			this.onServerClose();
 		} else {
-			console.log(`Relay "${this.state.code}": Client ${wsData.peerID} websocket closed: ${reason}`);
+			console.log(`Relay "${this.state.code}": Client ${wsData.peerID} websocket closed${reason ? ": " + reason : ""}`);
 			this.onClientClose(wsData.peerID);
 		}
 	}
