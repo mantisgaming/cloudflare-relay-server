@@ -49,7 +49,7 @@ async function createMessageDigest(payload: any, ...keys: string[]): Promise<str
 	binaryKeys.reduce((offset, key) => {
 		data.set(key, offset);
 		return offset + key.length;
-	}, data.length);
+	}, payloadBytes.length);
 
 	return toHexString(new Uint8Array(await crypto.subtle.digest("SHA-256", data)));
 }
@@ -242,7 +242,7 @@ export class LobbyDO extends DurableObject<Env> {
 		this.server = null;
 		this.peers = new Map();
 		this.state = {
-			code: null,
+			code: this.state.code,
 			nextPeer: 0,
 			lastCleanup: Date.now(),
 			requestBucket: Bucket.createDefaultState(this.requestBucketParams),
