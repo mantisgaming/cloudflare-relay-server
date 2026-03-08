@@ -279,8 +279,6 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	async pingRoutine(): Promise<void> {
-		await this.ctx.blockConcurrencyWhile(this.loadState.bind(this));
-
 		for (const socket of this.ctx.getWebSockets()) {
 			socket.send("ping");
 		}
