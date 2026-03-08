@@ -263,7 +263,7 @@ export class LobbyDO extends DurableObject<Env> {
 		};
 
 		// Send info to server
-		server.send(JSON.stringify(infoPacket));
+		server.send(JSON.stringify([infoPacket]));
 
 		// Log success
 		console.log(`Relay "${this.state.code}": Server connected to lobby`);
@@ -320,13 +320,13 @@ export class LobbyDO extends DurableObject<Env> {
 		};
 
 		// Create packet
-		const infoPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
+		const connectPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
 			dgs: await createMessageDigest(connectPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
 			pld: connectPayload
 		};
 
 		// Send info to server
-		server.send(JSON.stringify(infoPacket));
+		server.send(JSON.stringify([connectPacket]));
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
@@ -412,8 +412,27 @@ export class LobbyDO extends DurableObject<Env> {
 			pld: infoPayload
 		};
 
+		const connectionPackets: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">>[] = [];
+
+		for (const [pid, ws] of this.peers.entries()) {
+			// Inform the server of the new connection
+			const connectPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
+				msg: "con",
+				pid: pid
+			};
+
+			// Create packet
+			const connectPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
+				dgs: await createMessageDigest(connectPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+				pld: connectPayload
+			};
+
+			// Add to list of packets
+			connectionPackets.push(connectPacket);
+		}
+
 		// Send info to server
-		server.send(JSON.stringify(infoPacket));
+		server.send(JSON.stringify([infoPacket, ...connectionPackets]));
 
 		// Log success
 		console.log(`Relay "${this.state.code}": Server connected to lobby`);
@@ -548,7 +567,7 @@ export class LobbyDO extends DurableObject<Env> {
 				};
 
 				// Send Packet
-				clientWS.send(JSON.stringify(infoPacket));
+				clientWS.send(JSON.stringify([infoPacket]));
 				break;
 
 			default:
@@ -603,7 +622,7 @@ export class LobbyDO extends DurableObject<Env> {
 		};
 
 		// Send disconnect message
-		this.server.send(JSON.stringify(message));
+		this.server.send(JSON.stringify([message]));
 	}
 
 	// Handle messages from a client
@@ -640,7 +659,7 @@ export class LobbyDO extends DurableObject<Env> {
 				dgs: await createMessageDigest(payload, this.env.HMAC_APPLICATION_SECRET, peerData.key)
 			}
 
-			socket.send(JSON.stringify(message));
+			socket.send(JSON.stringify([message]));
 		}
 	}
 
@@ -668,6 +687,6 @@ export class LobbyDO extends DurableObject<Env> {
 		};
 
 		// Send data message
-		this.server.send(JSON.stringify(message));
+		this.server.send(JSON.stringify([message]));
 	}
 }
