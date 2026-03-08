@@ -102,5 +102,3 @@ export type RelayMessage<T extends RelayMessagePayload.Base<D> = RelayMessagePay
     /** Relay message MAC digest for message validation */
     dgs: string;
 };
-
-export type RelayPacket = RelayMessage[] | "ping" | "pong";

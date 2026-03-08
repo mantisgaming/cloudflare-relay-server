@@ -4,20 +4,28 @@ import { RelayMessage, RelayMessagePayload } from "./RelayMessage";
 interface LobbyState {
 	code: string | null;
 	nextPeer: number;
+	lastCleanup: number;
 }
 
 type WebsocketMetadata = {
+	/** HMAC Key for this websocket */
 	key: string;
+	/** The last time a valid message was received */
 	lastMessageTime: number;
+	/** The last time any message or ping was received */
 	lastActiveTime: number;
-	isServer: true;
-} | {
-	key: string;
-	lastMessageTime: number;
-	lastActiveTime: number;
-	isServer: false,
-	peerID: number
-};
+	/** Whether or not the websocket is a server host */
+	isServer: boolean;
+} & (
+		{
+			isServer: true;
+		} | {
+
+			isServer: false,
+			/** Peer ID number for this websocket */
+			peerID: number
+		}
+	);
 
 function createRandomKey(length: number): string {
 	const buffer = new Uint8Array(length);
@@ -25,18 +33,25 @@ function createRandomKey(length: number): string {
 	return toHexString(buffer);
 }
 
-async function getDigest(payload: any, ...keys: Uint8Array[]): Promise<Uint8Array> {
+async function createMessageDigest(payload: any, ...keys: string[]): Promise<string> {
+	const binaryKeys = keys.map(fromHexString);
 	const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
 
-	const data = new Uint8Array(payloadBytes.length + keys.reduce((size, key) => size + key.length, 0));
+	const data = new Uint8Array(payloadBytes.length + binaryKeys.reduce((size, key) => size + key.length, 0));
 
-	data.set(payload, 0);
-	keys.reduce((offset, key) => {
+	data.set(payloadBytes, 0);
+	binaryKeys.reduce((offset, key) => {
 		data.set(key, offset);
 		return offset + key.length;
 	}, data.length);
 
-	return new Uint8Array(await crypto.subtle.digest("SHA-256", data));
+	return toHexString(new Uint8Array(await crypto.subtle.digest("SHA-256", data)));
+}
+
+async function verifyMessageDigest(message: RelayMessage, ...keys: string[]): Promise<boolean> {
+	const calculatedDigest = await createMessageDigest(message.pld, ...keys);
+	const receivedDigest = message.dgs;
+	return calculatedDigest === receivedDigest;
 }
 
 function toHexString(data: Uint8Array): string {
@@ -62,7 +77,8 @@ function fromHexString(hexString: string): Uint8Array {
 export class LobbyDO extends DurableObject<Env> {
 	private state: LobbyState = {
 		code: null,
-		nextPeer: 0
+		nextPeer: 0,
+		lastCleanup: Date.now()
 	}
 
 	private server: WebSocket | null = null;
@@ -92,17 +108,33 @@ export class LobbyDO extends DurableObject<Env> {
 				this.peers.set(data.peerID, ws);
 			}
 		}
+
+		// Update database with lobby connection state
+		env.RELAY_D1.prepare(`
+			UPDATE lobbies
+			SET connected = ?
+			WHERE code = ?
+		`).bind(this.server === null ? 0 : 1, this.state.code).run();
 	}
 
+	/** Save the state of the durable object */
 	private saveState(): void {
 		this.ctx.storage.put(this.state as Record<string, any>)
 	}
 
+	/** Load the state of the durable object */
 	private async loadState(): Promise<void> {
 		Object.assign(this.state, await this.ctx.storage.get(Object.keys(this.state)));
 	}
 
-	private cleanup(): void {
+	/** Remove any websockets that have not responded recently */
+	private async cleanup(): Promise<void> {
+		if (Date.now() - this.state.lastCleanup < 1000 * 1)
+			return;
+
+		this.state.lastCleanup = Date.now();
+		this.saveState();
+
 		for (const socket of this.ctx.getWebSockets()) {
 			const socketData = socket.deserializeAttachment() as WebsocketMetadata;
 			const lastAction = socketData.lastActiveTime;
@@ -114,31 +146,31 @@ export class LobbyDO extends DurableObject<Env> {
 			const now = Date.now();
 
 			if (now - lastMessage > 1000 * 15) {
-				if (socketData.isServer) {
-					this.onServerClose(socket, new CloseEvent("Server timed out"));
-				} else {
-					this.onClientClose(socket, new CloseEvent("Client timed out"));
-				}
+				socket.close(1000, "Connection Timed Out");
 			} else if (now - lastAction > 1000 * 60 * 30) {
-				if (socketData.isServer) {
-					this.onServerClose(socket, new CloseEvent("Server was idle"));
-				} else {
-					this.onClientClose(socket, new CloseEvent("Client was idle"));
-				}
+				socket.close(1000, "Connection Idle");
 			}
+		}
+
+		// If the lobby has been removed from the database, it should be reset
+		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.state.code).all();
+		if (!existingLobby) {
+			this.reset();
 		}
 	}
 
+	/** Reset the durable object */
 	reset(): void {
 		this.server = null;
 		this.peers = new Map();
 		this.state = {
 			code: null,
-			nextPeer: 0
+			nextPeer: 0,
+			lastCleanup: Date.now()
 		}
 
 		for (const socket of this.ctx.getWebSockets()) {
-			socket.close(1012, "Lobby has been reset");
+			socket.close(1012, "Lobby Reset");
 		}
 
 		this.saveState();
@@ -225,10 +257,9 @@ export class LobbyDO extends DurableObject<Env> {
 			msg: "inf"
 		};
 
-		// Generate hmac
-		const hmac = await getDigest(infoPayload, fromHexString(this.env.HMAC_APPLICATION_SECRET), fromHexString(serverWSData.key));
+		// Create packet
 		const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-server">> = {
-			dgs: toHexString(hmac),
+			dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
 			pld: infoPayload
 		};
 
@@ -289,10 +320,9 @@ export class LobbyDO extends DurableObject<Env> {
 			pid: id
 		};
 
-		// Generate hmac
-		const hmac = await getDigest(infoPayload, fromHexString(this.env.HMAC_APPLICATION_SECRET), fromHexString(serverWSData.key));
+		// Create packet
 		const infoPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
-			dgs: toHexString(hmac),
+			dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
 			pld: infoPayload
 		};
 
@@ -335,7 +365,7 @@ export class LobbyDO extends DurableObject<Env> {
 		const existingLobby = await this.env.RELAY_D1.prepare(`
 			SELECT * FROM lobbies
 			WHERE code = ? AND reconnect_code = ?
-		`).bind(code).bind(reconnectCode).first();
+		`).bind(code, reconnectCode).first();
 
 		if (!existingLobby) {
 			return new Response(`Lobby "${code}" not found or invalid code provided`, { status: 404 });
@@ -377,10 +407,9 @@ export class LobbyDO extends DurableObject<Env> {
 			msg: "inf"
 		};
 
-		// Generate hmac
-		const hmac = await getDigest(infoPayload, fromHexString(this.env.HMAC_APPLICATION_SECRET), fromHexString(serverWSData.key));
+		// Create Packet
 		const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-server">> = {
-			dgs: toHexString(hmac),
+			dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
 			pld: infoPayload
 		};
 
@@ -401,74 +430,82 @@ export class LobbyDO extends DurableObject<Env> {
 		return peer;
 	}
 
+	/** Any websocket message will call this function */
 	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
-		const wsID = ws.deserializeAttachment() as string;
-		this.lastUsedTime.set(wsID, Date.now());
+		// Get the websocket data and update its last active time
+		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
+		wsData.lastActiveTime = Date.now();
+		ws.serializeAttachment(wsData);
 
+		// Run cleanup routine
 		this.cleanup();
-		if (this.isSocketServer(wsID)) {
-			this.onServerMessage(new MessageEvent("message", { data: message }));
+
+		// Reject binary data
+		if (typeof message == "object") {
+			ws.close(1007, "Received Binary Data");
+			return;
+		}
+
+		// Respond to ping message
+		if (message === "ping") {
+			ws.send("pong");
+			return;
+		}
+
+		// Ignore pong message
+		if (message === "pong") {
+			return;
+		}
+
+		// Parse data
+		const messageData = JSON.parse(message) as RelayMessage;
+
+		// Check hmac
+		if (!verifyMessageDigest(messageData, this.env.HMAC_APPLICATION_SECRET, wsData.key)) {
+			ws.close(1007, "HMAC Digest Did Not Match");
+			return;
+		}
+
+		// Call corresponding event handler
+		if (wsData.isServer) {
+			this.onServerMessage(ws, wsData, messageData);
 		} else {
-			const peerID = this.getPeerFromWebSocket(wsID);
-			if (peerID !== null) {
-				this.onClientMessage(peerID, new MessageEvent("message", { data: message }));
-			} else {
-				console.warn(`Relay "${this.code}": Received message from unknown WebSocket`);
-				console.log(`Known websockets: ${JSON.stringify(this.websocketMap)}`)
-				ws.close();
-			}
+			this.onClientMessage(ws, wsData, messageData);
 		}
 	}
 
 	webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void {
-		const wsID = ws.deserializeAttachment() as string;
-		this.lastUsedTime.delete(wsID);
+		// Get the websocket data
+		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
 
+		// Run cleanup routine
 		this.cleanup();
-		if (this.isSocketServer(wsID)) {
-			this.onServerClose(new CloseEvent("close", { code, reason, wasClean }));
-		} else {
-			const peerID = this.getPeerFromWebSocket(wsID);
-			if (peerID !== null) {
-				this.onClientClose(peerID, new CloseEvent("close", { code, reason, wasClean }));
-			} else {
-				console.warn(`Relay "${this.code}": Received close event from unknown WebSocket`);
-				ws.close();
-			}
-		}
 
-		this.saveState();
+		ws.close(code, reason);
+
+		// Call corresponding event handler
+		if (wsData.isServer) {
+			console.log(`Relay "${this.state.code}": Server websocket closed: ${reason}`);
+			this.onServerClose();
+		} else {
+			console.log(`Relay "${this.state.code}": Client ${wsData.peerID} websocket closed: ${reason}`);
+			this.onClientClose(wsData.peerID);
+		}
 	}
 
 	webSocketError(ws: WebSocket, error: unknown): void {
+		// Get the websocket data
+		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
+
+		// Run cleanup routine
 		this.cleanup();
-		const wsID = ws.deserializeAttachment() as string;
-		if (this.isSocketServer(wsID)) {
-			this.onServerError(new ErrorEvent("error", { error }));
+
+		// Call corresponding event handler
+		if (wsData.isServer) {
+			console.warn(`Relay "${this.state.code}": Server websocket error: ${error}`);
 		} else {
-			const peerID = this.getPeerFromWebSocket(wsID);
-			if (peerID !== null) {
-				this.onClientError(peerID, new ErrorEvent("error", { error }));
-			} else {
-				console.warn(`Relay "${this.code}": Received error from unknown WebSocket`);
-			}
+			console.warn(`Relay "${this.state.code}": Client ${wsData.peerID} websocket error: ${error}`);
 		}
-	}
-
-	// Handle server disconnection
-	private onServerClose(event: CloseEvent) {
-		console.log(`Relay "${this.code}": server disconnected`);
-		this.getWebSocket(this.server)?.close();
-
-		// Remove the server
-		this.server = null;
-
-		// Update database to mark the lobby as disconnected
-		this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 0 WHERE code = ?").bind(this.code).run().catch((err) => {
-			console.error(`Relay "${this.code}": Error updating lobby state in database: ${err.message}`);
-		});
-
-		this.saveState();
 	}
 
 	// Handle messages from the server
@@ -512,6 +549,17 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 	}
 
+	// Handle server disconnection
+	private onServerClose() {
+		// Remove the server
+		this.server = null;
+
+		// Update database to mark the lobby as disconnected
+		this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 0 WHERE code = ?").bind(this.state.code).run().catch((err) => {
+			console.error(`Relay "${this.state.code}": Error updating lobby state in database: ${err.message}`);
+		});
+	}
+
 	// Disconnect a client by ID
 	private kickClient(ID: number): void {
 		// Find the client WebSocket
@@ -541,31 +589,29 @@ export class LobbyDO extends DurableObject<Env> {
 		this.saveState();
 	}
 
-	// Handle server WebSocket errors
-	private onServerError(error: ErrorEvent): void {
-		console.warn(`Relay "${this.code}": Server web socket error: ${error.message}`);
-	}
-
 	// Handle client disconnection
-	private onClientClose(ID: number, event: CloseEvent): void {
-		console.log(`Relay "${this.code}": Client "${ID}" disconnected`);
-		this.getPeerWebSocket(ID)?.close();
+	private async onClientClose(pid: number): Promise<void> {
+		this.peers.delete(pid);
 
-		// Inform the server of the disconnection
-		let msg: RelayMessage.InformDisconnect = {
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			type: RelayMessage.Type.DISCONNECT,
-			id: ID
+		if (this.server === null)
+			return;
+
+		const serverData: WebsocketMetadata = this.server.deserializeAttachment();
+
+		// Create disconnect payload
+		const payload: RelayMessagePayload.Disconnect<"relay-to-server"> = {
+			msg: "dsc",
+			pid: pid
 		};
 
-		// Send the message to the server
-		if (this.server !== null) {
-			this.getWebSocket(this.server)?.send(RelayMessage.serialize(msg));
-		}
+		// Create disconnect message
+		const message: RelayMessage<typeof payload> = {
+			pld: payload,
+			dgs: await createMessageDigest(payload, this.env.HMAC_APPLICATION_SECRET, serverData.key)
+		};
 
-		// Remove the client from peers
-		this.peers.delete(ID);
-		this.currentPeers &= ~(1 << ID);
+		// Send disconnect message
+		this.server.send(JSON.stringify(message));
 	}
 
 	// Handle messages from a client
@@ -590,11 +636,6 @@ export class LobbyDO extends DurableObject<Env> {
 				console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
 				return;
 		}
-	}
-
-	// Handle client WebSocket errors
-	private onClientError(ID: number, error: ErrorEvent): void {
-		console.warn(`Relay "${this.code}": Client "${ID}" web socket error: ${error.message}`);
 	}
 
 	// Forward data between server and clients
