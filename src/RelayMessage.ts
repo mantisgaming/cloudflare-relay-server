@@ -10,13 +10,15 @@
  * `dat` - Data  
  * `con` - Connect  
  * `dsc` - Disconnect  
- * `inf` - Relay Info
+ * `inf` - Relay Info  
+ * `unknown` - Placeholder for unexpected string
 */
 export type RelayMessageType =
     "dat" |
     "con" |
     "dsc" |
-    "inf";
+    "inf" |
+    "unknown";
 
 /** Directions messages can be sent in */
 export type RelayMessageDirection =
@@ -29,7 +31,7 @@ export type RelayMessageDirection =
  * Utility for payload templates which removes
  * fields that are typed as `never`
  */
-type OmitUndefined<T> = {
+export type OmitUndefined<T> = {
     [K in keyof T as T[K] extends undefined ? never : K]: T[K]
 }
 
@@ -40,6 +42,11 @@ export namespace RelayMessagePayload {
         /** Message type */
         msg: RelayMessageType;
     }
+
+    /** Unknown relay message */
+    export interface Unknown<T extends RelayMessageDirection> extends Base<T> {
+        msg: "unknown";
+    };
 
     /** Data relay message */
     export interface Data<T extends RelayMessageDirection> extends Base<T> {
@@ -53,10 +60,10 @@ export namespace RelayMessagePayload {
     }
 
     /** Connect relay message */
-    export interface Connect<T extends "relay-to-server" | "server-to-relay" | "relay-to-client"> extends Base<T> {
+    export interface Connect<T extends "relay-to-server" | "server-to-relay"> extends Base<T> {
         msg: "con";
         /** ID number of the relevant peer */
-        pid: T extends "relay-to-client" ? undefined : number;
+        pid: number;
     }
 
     /** Disconnect relay message */
@@ -78,12 +85,14 @@ export namespace RelayMessagePayload {
 
 /** Union of all message payload types */
 export type RelayMessagePayload =
+    RelayMessagePayload.Unknown<
+        RelayMessageDirection
+    > |
     RelayMessagePayload.Data<
         RelayMessageDirection
     > | 
     RelayMessagePayload.Connect<
         "server-to-relay" |
-        "relay-to-client" |
         "relay-to-server"
     > | 
     RelayMessagePayload.Disconnect<
@@ -102,3 +111,29 @@ export type RelayMessage<T extends RelayMessagePayload.Base<D> = RelayMessagePay
     /** Relay message MAC digest for message validation */
     dgs: string;
 };
+
+export type RelayMessageFromServer = RelayMessage<
+    RelayMessagePayload.Data<"server-to-relay"> |
+    RelayMessagePayload.Connect<"server-to-relay"> |
+    RelayMessagePayload.Disconnect<"server-to-relay"> |
+    RelayMessagePayload.Unknown<"server-to-relay">
+>;
+
+export type RelayMessageFromClient = RelayMessage<
+    RelayMessagePayload.Data<"client-to-relay"> |
+    RelayMessagePayload.Unknown<"client-to-relay">
+>;
+
+export type RelayMessageToServer = RelayMessage<
+    RelayMessagePayload.Data<"relay-to-server"> |
+    RelayMessagePayload.Connect<"relay-to-server"> |
+    RelayMessagePayload.Disconnect<"relay-to-server"> |
+    RelayMessagePayload.Info<"relay-to-server"> |
+    RelayMessagePayload.Unknown<"relay-to-server">
+>;
+
+export type RelayMessageToClient = RelayMessage<
+    RelayMessagePayload.Data<"relay-to-client"> |
+    RelayMessagePayload.Info<"relay-to-client"> |
+    RelayMessagePayload.Unknown<"relay-to-client">
+>;

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { RelayMessage, RelayMessagePayload } from "./RelayMessage";
+import { OmitUndefined, RelayMessage, RelayMessageFromClient, RelayMessageFromServer, RelayMessagePayload } from "./RelayMessage";
 
 interface LobbyState {
 	code: string | null;
@@ -20,7 +20,6 @@ type WebsocketMetadata = {
 		{
 			isServer: true;
 		} | {
-
 			isServer: false,
 			/** Peer ID number for this websocket */
 			peerID: number
@@ -315,15 +314,15 @@ export class LobbyDO extends DurableObject<Env> {
 		console.log(`Relay "${this.state.code}": Client "${id}" connected to lobby`);
 
 		// Inform the server of the new connection
-		const infoPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
+		const connectPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
 			msg: "con",
 			pid: id
 		};
 
 		// Create packet
 		const infoPacket: RelayMessage<RelayMessagePayload.Connect<"relay-to-server">> = {
-			dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
-			pld: infoPayload
+			dgs: await createMessageDigest(connectPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			pld: connectPayload
 		};
 
 		// Send info to server
@@ -458,19 +457,21 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		// Parse data
-		const messageData = JSON.parse(message) as RelayMessage;
+		const messageDataArray = JSON.parse(message) as RelayMessage[];
 
-		// Check hmac
-		if (!verifyMessageDigest(messageData, this.env.HMAC_APPLICATION_SECRET, wsData.key)) {
-			ws.close(1007, "HMAC Digest Did Not Match");
-			return;
-		}
+		for (const messageData of messageDataArray) {
+			// Check hmac
+			if (!verifyMessageDigest(messageData, this.env.HMAC_APPLICATION_SECRET, wsData.key)) {
+				ws.close(1007, "HMAC Digest Did Not Match");
+				return;
+			}
 
-		// Call corresponding event handler
-		if (wsData.isServer) {
-			this.onServerMessage(ws, wsData, messageData);
-		} else {
-			this.onClientMessage(ws, wsData, messageData);
+			// Call corresponding event handler
+			if (wsData.isServer) {
+				this.onServerMessage(messageData as RelayMessageFromServer);
+			} else {
+				this.onClientMessage(wsData.peerID, messageData as RelayMessageFromClient);
+			}
 		}
 	}
 
@@ -509,43 +510,49 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Handle messages from the server
-	private onServerMessage(event: MessageEvent): void {
-		// Deserialize the message
-		const data = new Uint8Array(event.data as ArrayBuffer);
-		if (data == undefined)
-			return;
-
-		var message = RelayMessage.deserialize(data, RelayMessage.Direction.SERVER_TO_RELAY);
-
+	private async onServerMessage(message: RelayMessageFromServer): Promise<void> {
 		// Handle the message based on its type
-		switch (message.type) {
-			case RelayMessage.Type.DATA:
-				this.forwardData(message as RelayMessage.ServerDataIn);
+		switch (message.pld.msg) {
+			case "dat":
+				this.forwardDataFromServer(message as any);
 				break;
 
-			case RelayMessage.Type.DISCONNECT:
-				this.kickClient(message.id);
+			case "dsc":
+				this.kickClient(message.pld.pid);
 				break;
 
-			case RelayMessage.Type.CONNECT:
+			case "con":
 				// Inform the client of the accepted connection
-				const msg: RelayMessage.InformConnectClient = {
-					direction: RelayMessage.Direction.RELAY_TO_CLIENT,
-					type: RelayMessage.Type.CONNECT
-				}
-				const acceptMsg = message as RelayMessage.AcceptConnection;
-				const peer = this.peers.get(acceptMsg.id);
-				if (peer != undefined)
-					this.getWebSocket(peer)?.send(RelayMessage.serialize(msg));
-				else
-					console.warn(`Relay "${this.code}": Cannot send accept to invalid peer ID "${acceptMsg.id}"`);
-				break;
+				const clientID = message.pld.pid;
+				const clientWS = this.peers.get(clientID);
 
-			case RelayMessage.Type.PING:
+				// Check that the client exists
+				if (clientWS === undefined) {
+					console.warn(`Relay "${this.state.code}": Server accepted invalid client ID`);
+					return;
+				}
+
+				// Get client socket info
+				const clientWSData = clientWS.deserializeAttachment() as WebsocketMetadata;
+
+				// Create the payload
+				const infoPayload: OmitUndefined<RelayMessagePayload.Info<"relay-to-client">> = {
+					msg: "inf",
+					key: clientWSData.key
+				};
+
+				// Create Packet
+				const infoPacket: RelayMessage<RelayMessagePayload.Info<"relay-to-client">> = {
+					dgs: await createMessageDigest(infoPayload, this.env.HMAC_APPLICATION_SECRET, clientWSData.key),
+					pld: infoPayload
+				};
+
+				// Send Packet
+				clientWS.send(JSON.stringify(infoPacket));
 				break;
 
 			default:
-				console.warn(`Relay "${this.code}": Unexpected message type from server: ${(data as Uint8Array)[0]}`)
+				console.warn(`Relay "${this.state.code}": Unexpected message type from server: ${message.pld.msg}`)
 		}
 	}
 
@@ -561,32 +568,17 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Disconnect a client by ID
-	private kickClient(ID: number): void {
-		// Find the client WebSocket
-		let ws = this.getPeerWebSocket(ID);
-		if (ws === null) {
-			console.warn(`Relay "${this.code}": Cannot kick client "${ID}" They do not exist.`);
+	private kickClient(pid: number): void {
+		const peer = this.peers.get(pid);
+
+		// Do nothing if there is no client with the pid
+		if (peer === undefined) {
+			console.warn(`Relay "${this.state.code}": Cannot kick client "${pid}" They do not exist.`);
 			return;
 		}
 
 		// Close the WebSocket and remove from peers
-		ws.close();
-		this.peers.delete(ID);
-		this.currentPeers &= ~(1 << ID);
-
-		// Inform the server of the disconnection
-		let msg: RelayMessage.InformDisconnect = {
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			type: RelayMessage.Type.DISCONNECT,
-			id: ID
-		};
-
-		if (this.server !== null) {
-			console.warn(`Relay "${this.code}": Cannot kick client "${ID}" No server connected.`);
-			this.getWebSocket(this.server)?.send(RelayMessage.serialize(msg));
-		}
-
-		this.saveState();
+		peer.close(1000, "Kicked From Server");
 	}
 
 	// Handle client disconnection
@@ -615,73 +607,67 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	// Handle messages from a client
-	private onClientMessage(ID: number, event: MessageEvent): void {
-		// Deserialize the message
-		const data = new Uint8Array(event.data as ArrayBuffer);
-		if (data == undefined)
-			return;
-
-		var message = RelayMessage.deserialize(data, RelayMessage.Direction.CLIENT_TO_RELAY);
-
+	private onClientMessage(pid: number, message: RelayMessageFromClient): void {
 		// Handle the message based on its type
-		switch (message.type) {
-			case RelayMessage.Type.DATA:
-				this.forwardData(message as RelayMessage.ClientData, ID);
-				return;
-
-			case RelayMessage.Type.PING:
+		switch (message.pld.msg) {
+			case "dat":
+				this.forwardDataFromClient(pid, message as any);
 				break;
 
 			default:
-				console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
+				console.warn(`Relay "${this.state.code}": Unexpected message type from client: ${pid}`);
 				return;
 		}
 	}
 
-	// Forward data between server and clients
-	private forwardData(message: RelayMessage.ServerDataIn): void;
-	private forwardData(message: RelayMessage.ClientData, source: number): void;
-	private forwardData(message: RelayMessage.ClientData | RelayMessage.ServerDataIn, source?: number): void {
-		// Forward based on message direction
-		if (message.direction === RelayMessage.Direction.SERVER_TO_RELAY) {
-			// Create a new message to send to clients
-			const newMessage: RelayMessage.ClientData = {
-				type: message.type,
-				direction: RelayMessage.Direction.RELAY_TO_CLIENT,
-				data: message.data
+	// Forward data from a server to one or more clients
+	private async forwardDataFromServer(srcMessage: RelayMessage<RelayMessagePayload.Data<"server-to-relay">>): Promise<void> {
+		for (const [pid, socket] of this.peers) {
+			// Only send messages to intended peers
+			if (!srcMessage.pld.dst.includes(pid))
+				continue;
+
+			const peerData = socket.deserializeAttachment() as WebsocketMetadata;
+
+			// Create data payload
+			const payload: OmitUndefined<RelayMessagePayload.Data<"relay-to-client">> = {
+				msg: "dat",
+				dat: srcMessage.pld.dat
+			};
+
+			const message: RelayMessage<RelayMessagePayload.Data<"relay-to-client">> = {
+				pld: payload,
+				dgs: await createMessageDigest(payload, this.env.HMAC_APPLICATION_SECRET, peerData.key)
 			}
 
-			const serialMessage = RelayMessage.serialize(newMessage);
-
-			// Send to all connected peers
-			for (let i = 0; i < 32; i++) {
-				// Check if the peer is connected
-				const shouldSend: boolean =
-					(this.currentPeers >>> i & 1) === 1 &&
-					(message.destinations >>> i & 1) === 1;
-
-				// Send the message if connected
-				if (shouldSend) {
-					const peer = this.getPeerWebSocket(i);
-					if (peer != null)
-						peer.send(serialMessage);
-					else
-						console.warn(`Relay "${this.code}": Cannot send data to invalid peer ID "${i}"`);
-				}
-			}
-		} else if (message.direction === RelayMessage.Direction.CLIENT_TO_RELAY) {
-			// Create a new message to send to the server
-			const newMessage: RelayMessage.ServerDataOut = {
-				type: message.type,
-				direction: RelayMessage.Direction.RELAY_TO_SERVER,
-				source: source as number,
-				data: message.data
-			}
-
-			// Send to the server
-			if (this.server !== null) {
-				this.getWebSocket(this.server)?.send(RelayMessage.serialize(newMessage));
-			}
+			socket.send(JSON.stringify(message));
 		}
+	}
+
+	// Forward data from a client to the server
+	private async forwardDataFromClient(pid: number, srcMessage: RelayMessage<RelayMessagePayload.Data<"client-to-relay">>): Promise<void> {
+		// Ignore message if the server is not connected
+		if (this.server === null) {
+			return;
+		}
+
+		// Get server data
+		const serverData = this.server.deserializeAttachment() as WebsocketMetadata;
+
+		// Create data payload
+		const payload: OmitUndefined<RelayMessagePayload.Data<"relay-to-server">> = {
+			msg: "dat",
+			src: pid,
+			dat: srcMessage.pld.dat
+		};
+
+		// Create data message
+		const message: RelayMessage<typeof payload> = {
+			pld: payload,
+			dgs: await createMessageDigest(payload, this.env.HMAC_APPLICATION_SECRET, serverData.key)
+		};
+
+		// Send data message
+		this.server.send(JSON.stringify(message));
 	}
 }
