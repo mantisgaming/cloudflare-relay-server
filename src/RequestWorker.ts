@@ -138,17 +138,19 @@ export const RequestWorker: ExportedHandler<Env> = {
             // Return the response from the lobby Durable Object
             return await stub.fetch(newRequest);
         });
-
-        // Fallback for unknown routes
-        router.all('*', () => {
-            return new Response("Not Found", { status: 404 });
-        });
-
+        
         // Handle the request using the router
-        return router.fetch(request).catch((err) => {
+        const result = await router.fetch(request).catch((err) => {
             console.error(`Worker: Error handling request: ${err.message}`);
             return new Response(err.message || "Internal Error", { status: err.status || 500 });
         });
+
+        // Fallback for unknown routes
+        if (!result) {
+            return new Response("Not Found", { status: 404 });
+        }
+
+        return result;
     },
     async scheduled(cont, env, ctx): Promise<void> {
         // Scheduler gets called every 5 seconds
