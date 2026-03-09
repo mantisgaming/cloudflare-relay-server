@@ -3,9 +3,9 @@
 DROP TABLE IF EXISTS lobbies;
 CREATE TABLE lobbies (
     code TEXT PRIMARY KEY ASC ON CONFLICT FAIL,
-    last_updated DATETIME DEFAULT (unixepoch()),
+    reconnect_code TEXT,
     connected BOOLEAN DEFAULT TRUE,
-    reconnect_code INTEGER DEFAULT (ABS(RANDOM()) % 65536)
+    last_updated DATETIME DEFAULT (unixepoch())
 );
 
 -- Create table of banned codes

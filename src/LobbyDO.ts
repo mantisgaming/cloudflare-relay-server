@@ -295,11 +295,12 @@ export class LobbyDO extends DurableObject<Env> {
 		// Save the code
 		this.state.code = code;
 		this.saveState();
+		const randomCode = createRandomKey(2);
 
 		// Insert the new lobby code into the database
-		const insertResult = await this.env.RELAY_D1.prepare("INSERT INTO lobbies (code) VALUES (?)").bind(this.state.code).run();
+		const insertResult = await this.env.RELAY_D1.prepare("INSERT INTO lobbies (code, reconnect_code) VALUES (?, ?)").bind(this.state.code, randomCode).run();
 		if (insertResult.error) {
-			return new Response("Database Error", { status: 500 });
+			return new Response("Database Error (creating lobby)", { status: 500 });
 		}
 
 		// Create a WebSocket pair
@@ -323,6 +324,7 @@ export class LobbyDO extends DurableObject<Env> {
 		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
 			code: this.state.code,
 			key: serverWSData.key,
+			reconnectKey: randomCode,
 			msg: "inf"
 		};
 
@@ -466,8 +468,10 @@ export class LobbyDO extends DurableObject<Env> {
 			return new Response(`Lobby belongs to different code`, { status: 500 });
 		}
 
+		const randomCode = createRandomKey(2);
+
 		// Update database to mark the lobby as connected
-		const updateResult = await this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 1 WHERE code = ?").bind(this.state.code).run();
+		const updateResult = await this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 1, reconnect_code = ? WHERE code = ?").bind(randomCode, this.state.code).run();
 		if (updateResult.error) {
 			return new Response("Database Error", { status: 500 });
 		}
@@ -493,6 +497,7 @@ export class LobbyDO extends DurableObject<Env> {
 		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
 			code: this.state.code,
 			key: serverWSData.key,
+			reconnectKey: randomCode,
 			msg: "inf"
 		};
 

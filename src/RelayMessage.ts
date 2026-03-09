@@ -80,6 +80,8 @@ export namespace RelayMessagePayload {
         key: string;
         /** Lobby code */
         code: T extends "relay-to-server" ? string : undefined;
+        /** Key to reconnect to the same lobby code */
+        reconnectKey: T extends "relay-to-server" ? string : undefined;
     }
 }
 
