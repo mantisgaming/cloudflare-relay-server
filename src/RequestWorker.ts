@@ -185,7 +185,7 @@ async function getNewLobbyCode(generator: DurableObjectStub<CodeGeneratorDO>, db
         }
 
         // Check if the code is banned
-        const bannedCode = await db.prepare("SELECT * FROM banned_codes WHERE code = ?").bind(code).first();
+        const bannedCode = await db.prepare("SELECT * FROM banned_codes WHERE INSTR(?, code)").bind(code).first();
         if (bannedCode) {
             continue; // Code is banned, try again
         }
