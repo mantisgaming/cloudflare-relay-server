@@ -24,6 +24,14 @@ export const RequestWorker: ExportedHandler<Env> = {
 
         const globalRateLimiter = env.GLOBAL_RATE_LIMITER_DO.getByName("singleton") as DurableObjectStub<GlobalRateLimiterDO>;
 
+        if (!await globalRateLimiter.acquireToken("any")) {
+            return new Response("Request has been rate limited", { status: 429 });
+        }
+
+        if (!await ipRateLimiter.acquireToken(IP, "any")) {
+            return new Response("Request has been rate limited", { status: 429 });
+        }
+        
         // Apply parameter middleware
         router.all('*', withParams);
 

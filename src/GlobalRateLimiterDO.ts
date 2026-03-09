@@ -41,27 +41,8 @@ export class GlobalRateLimiterDO extends DurableObject<Env> {
 
     /** Acquire permission to make a request */
     public acquireToken(requestType: string): boolean {
-        const bucketKeys: string[] = [
-            "any",
-            requestType,
-        ];
-
-        const buckets = bucketKeys.map<Bucket.BucketData>(this.getBucket.bind(this));
-
-        const now = Date.now();
-
-        for (let i = 0; i < buckets.length; i++) {
-            const bucket = buckets[i];
-
-            if (!Bucket.hasToken(bucket, now))
-                return false;
-        }
-
-        for (let i = 0; i < buckets.length; i++) {
-            Bucket.decrement(buckets[i], now);
-        }
-
-        return true;
+        const bucket = this.getBucket(requestType);
+        return Bucket.acquireToken(bucket);
     }
 
     private getBucket(key: string): Bucket.BucketData {
