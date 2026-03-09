@@ -15,9 +15,16 @@ CREATE TABLE banned_codes (
 );
 
 -- Insert banned codes
-INSERT INTO banned_codes (code) VALUES('FUCK');
-INSERT INTO banned_codes (code) VALUES('DICK');
-INSERT INTO banned_codes (code) VALUES('CUNT');
+INSERT INTO banned_codes (code)
+VALUES
+    ('FUCK'),
+    ('DICK'),
+    ('CUNT'),
+    ('SHIT'),
+    ('CRAP'),
+    ('CUCK'),
+    ('COCK'),
+    ('DAMN');
 
 -- Create trigger to update the last updated time for a lobby
 CREATE TRIGGER lobby_update
