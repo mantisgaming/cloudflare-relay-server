@@ -8,6 +8,11 @@ import { GlobalRateLimiterDO } from "./GlobalRateLimiterDO";
 export const RequestWorker: ExportedHandler<Env> = {
     // Handle incoming fetch requests
     async fetch(request, env, _ctx): Promise<Response> {
+        // Check that the relay is set up correctly
+        if (env.HMAC_APPLICATION_SECRET === undefined) {
+            return new Response("HMAC_APPLICATION_SECRET not set in environment variables", { status: 500 });
+        }
+
         // Set up the router
         const router = IttyRouter({
             base: env.BASE_ROUTE || "/relay"
@@ -31,7 +36,7 @@ export const RequestWorker: ExportedHandler<Env> = {
         if (!await ipRateLimiter.acquireToken(IP, "any")) {
             return new Response("Request has been rate limited", { status: 429 });
         }
-        
+
         // Apply parameter middleware
         router.all('*', withParams);
 
@@ -146,7 +151,7 @@ export const RequestWorker: ExportedHandler<Env> = {
             // Return the response from the lobby Durable Object
             return await stub.fetch(newRequest);
         });
-        
+
         // Handle the request using the router
         const result = await router.fetch(request).catch((err) => {
             console.error(`Worker: Error handling request: ${err.message}`);
