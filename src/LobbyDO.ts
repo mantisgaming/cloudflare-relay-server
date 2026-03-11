@@ -595,8 +595,10 @@ export class LobbyDO extends DurableObject<Env> {
 		// Save rate limiter state
 		ws.serializeAttachment(wsData);
 
-		// If rate limiter fails ignore messages
+		// If rate limiter fails send failure response
 		if (!pass) {
+			console.warn(`Relay "${this.state.code}": Rate limit exceeded for websocket`);
+			ws.send("rate_limited");
 			return;
 		}
 
