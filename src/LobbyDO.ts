@@ -122,8 +122,8 @@ export class LobbyDO extends DurableObject<Env> {
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
 		ctx.blockConcurrencyWhile((async () => {
-			await this.loadState.bind(this);
-			this.refreshSockets();
+			await this.loadState.bind(this)();
+			await this.refreshSockets.bind(this)();
 		}).bind(this));
 	}
 
@@ -166,7 +166,7 @@ export class LobbyDO extends DurableObject<Env> {
 			}
 		}
 
-		this.refreshSockets();
+		await this.refreshSockets();
 
 		// If the lobby has been removed from the database, it should be reset
 		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.state.code).all();
@@ -175,7 +175,7 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 	}
 
-	private refreshSockets(): void {
+	private async refreshSockets(): Promise<void> {
 		this.server = null;
 		this.peers = new Map();
 
@@ -197,18 +197,22 @@ export class LobbyDO extends DurableObject<Env> {
 				this.peers.set(data.peerID, ws);
 			}
 		}
-
+		
 		if (this.state.code === null)
 			return;
 
 		const connectedInt = this.server === null ? 0 : 1;
 
 		// Update database with lobby connection state
-		this.env.RELAY_D1.prepare(`
+		const result = await this.env.RELAY_D1.prepare(`
 			UPDATE lobbies
 			SET connected = ?
 			WHERE code = ? AND connected != ?
 		`).bind(connectedInt, this.state.code, connectedInt).run();
+
+		if (!result.success) {
+			console.error("Database Error (updating lobby connection state):", result.error);
+		}
 	}
 
 	/** Reset the durable object */
@@ -299,7 +303,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Insert the new lobby code into the database
 		const insertResult = await this.env.RELAY_D1.prepare("INSERT INTO lobbies (code, reconnect_code) VALUES (?, ?)").bind(this.state.code, randomCode).run();
-		if (insertResult.error) {
+		if (!insertResult.success) {
 			return new Response("Database Error (creating lobby)", { status: 500 });
 		}
 

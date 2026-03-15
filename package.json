@@ -4,10 +4,10 @@
 	"private": true,
 	"scripts": {
 		"deploy": "wrangler deploy",
-		"dev": "wrangler dev --test-scheduled -e=development",
+		"dev": "wrangler dev --test-scheduled -e=development --local",
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types",
-		"reset-local-db": "wrangler d1 execute RELAY_D1 --local --file=./RELAY_D1_schema.sql"
+		"reset-local-db": "wrangler d1 execute RELAY_D1 --local -e development --file=./RELAY_D1_schema.sql"
 	},
 	"devDependencies": {
 		"typescript": "^5.5.2",

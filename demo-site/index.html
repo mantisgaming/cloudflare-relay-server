@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TotSM Relay Demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">TotSM Cloudflare Relay</p>
+                <h1>Relay protocol demo console</h1>
+                <p class="hero-text">
+                    Create a lobby as the host server, join as a client, reconnect the host,
+                    inspect signed packets, and test relay data flow from a plain browser page.
+                </p>
+            </div>
+            <div class="hero-card">
+                <p class="hero-card-label">Protocol highlights</p>
+                <ul class="hero-points">
+                    <li>Signed `dat`, `con`, `dsc`, and `inf` packets</li>
+                    <li>Automatic heartbeat `ping` / `pong` handling</li>
+                    <li>Server-side accept, kick, and reconnect flows</li>
+                </ul>
+            </div>
+        </header>
+
+        <main class="dashboard">
+            <section class="panel config-panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Shared settings</p>
+                        <h2>Connection config</h2>
+                    </div>
+                    <button id="clearLogButton" class="ghost-button" type="button">Clear log</button>
+                </div>
+
+                <label class="field">
+                    <span>Relay URL</span>
+                    <input id="relayUrlInput" type="text" spellcheck="false" placeholder="http://127.0.0.1:8787/relay">
+                </label>
+
+                <label class="field">
+                    <span>Application secret (hex)</span>
+                    <input id="appSecretInput" type="text" spellcheck="false" placeholder="Required to send signed packets">
+                </label>
+
+                <label class="toggle-row">
+                    <input id="verifyIncomingCheckbox" type="checkbox" checked>
+                    <span>Verify incoming packet digests when the secret is available</span>
+                </label>
+
+                <label class="toggle-row">
+                    <input id="autoAcceptCheckbox" type="checkbox" checked>
+                    <span>Automatically accept new clients when acting as server</span>
+                </label>
+
+                <div class="summary-grid">
+                    <article class="summary-tile">
+                        <span class="summary-label">Saved lobby code</span>
+                        <strong id="savedLobbyCode">-</strong>
+                    </article>
+                    <article class="summary-tile">
+                        <span class="summary-label">Saved reconnect key</span>
+                        <strong id="savedReconnectKey">-</strong>
+                    </article>
+                    <article class="summary-tile">
+                        <span class="summary-label">Heartbeat</span>
+                        <strong>Every 5 seconds</strong>
+                    </article>
+                </div>
+
+                <p class="footnote">
+                    The relay signs packets with the application secret plus the per-socket session key.
+                    Enter the same hex secret configured in the Worker if you want this demo to send packets.
+                </p>
+            </section>
+
+            <section class="panel server-panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Host controls</p>
+                        <h2>Server socket</h2>
+                    </div>
+                    <span id="serverStatus" class="status-badge idle">Idle</span>
+                </div>
+
+                <div class="action-row">
+                    <button id="createServerButton" type="button">Create lobby as server</button>
+                    <button id="reconnectServerButton" class="secondary-button" type="button">Reconnect server</button>
+                    <button id="disconnectServerButton" class="ghost-button" type="button">Disconnect server</button>
+                </div>
+
+                <div class="info-grid">
+                    <article class="info-card">
+                        <span>Lobby code</span>
+                        <strong id="serverLobbyCode">-</strong>
+                    </article>
+                    <article class="info-card">
+                        <span>Reconnect key</span>
+                        <strong id="serverReconnectKey">-</strong>
+                    </article>
+                    <article class="info-card">
+                        <span>Session key</span>
+                        <strong id="serverSessionKey">-</strong>
+                    </article>
+                </div>
+
+                <div class="split-grid">
+                    <div class="stack">
+                        <div class="subpanel">
+                            <div class="subpanel-header">
+                                <h3>Peers</h3>
+                                <button id="refreshPeerListButton" class="ghost-button" type="button">Refresh list</button>
+                            </div>
+                            <div id="peerList" class="peer-list empty">No peers observed yet.</div>
+                        </div>
+
+                        <div class="subpanel">
+                            <h3>Send server data</h3>
+                            <label class="field compact-field">
+                                <span>Destination peer IDs</span>
+                                <input id="serverDestinationsInput" type="text" spellcheck="false" placeholder="* or comma-separated IDs">
+                            </label>
+                            <label class="field compact-field">
+                                <span>Payload JSON</span>
+                                <textarea id="serverPayloadInput" rows="6" spellcheck="false">{
+  "kind": "server-demo",
+  "message": "Hello from the relay host"
+}</textarea>
+                            </label>
+                            <button id="sendServerDataButton" class="secondary-button" type="button">Send `dat` from server</button>
+                        </div>
+                    </div>
+
+                    <div class="subpanel">
+                        <h3>Server notes</h3>
+                        <p class="note-block">
+                            When a client joins, the relay first sends the server a `con` packet with a numeric
+                            `pid`. This demo can automatically accept that peer by sending `con` back to the relay,
+                            or you can do it manually from the peer list.
+                        </p>
+                        <p class="note-block">
+                            Use the reconnect button after closing the server socket to verify that the relay issues
+                            a replacement reconnect key and replays currently connected peers.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel client-panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Peer controls</p>
+                        <h2>Client socket</h2>
+                    </div>
+                    <span id="clientStatus" class="status-badge idle">Idle</span>
+                </div>
+
+                <div class="field-row">
+                    <label class="field grow">
+                        <span>Lobby code</span>
+                        <input id="clientLobbyCodeInput" type="text" spellcheck="false" placeholder="ABCD">
+                    </label>
+                    <div class="action-row compact-actions">
+                        <button id="joinClientButton" type="button">Join as client</button>
+                        <button id="disconnectClientButton" class="ghost-button" type="button">Disconnect client</button>
+                    </div>
+                </div>
+
+                <div class="info-grid client-info-grid">
+                    <article class="info-card">
+                        <span>Joined lobby</span>
+                        <strong id="clientLobbyCode">-</strong>
+                    </article>
+                    <article class="info-card">
+                        <span>Session key</span>
+                        <strong id="clientSessionKey">-</strong>
+                    </article>
+                </div>
+
+                <div class="split-grid">
+                    <div class="subpanel">
+                        <h3>Send client data</h3>
+                        <label class="field compact-field">
+                            <span>Payload JSON</span>
+                            <textarea id="clientPayloadInput" rows="6" spellcheck="false">{
+  "kind": "client-demo",
+  "input": "jump"
+}</textarea>
+                        </label>
+                        <button id="sendClientDataButton" class="secondary-button" type="button">Send `dat` from client</button>
+                    </div>
+
+                    <div class="subpanel">
+                        <h3>Client notes</h3>
+                        <p class="note-block">
+                            A newly joined client does not receive its session key until the server accepts it.
+                            If auto-accept is disabled, use the peer controls in the server section first.
+                        </p>
+                        <p class="note-block">
+                            Open multiple tabs to simulate multiple clients against the same lobby.
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel log-panel">
+                <div class="panel-header">
+                    <div>
+                        <p class="panel-kicker">Live output</p>
+                        <h2>Activity log</h2>
+                    </div>
+                    <span id="errorBanner" class="error-banner hidden">No errors</span>
+                </div>
+
+                <div id="logOutput" class="log-output" aria-live="polite"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="./app.js"></script>
+</body>
+</html>
