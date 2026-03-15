@@ -326,6 +326,45 @@ button:hover {
     color: var(--muted);
 }
 
+.client-instance-actions {
+    margin-top: 16px;
+}
+
+.client-roster-panel {
+    margin-top: 14px;
+}
+
+.client-roster {
+    margin-top: 12px;
+    display: grid;
+    gap: 10px;
+}
+
+.client-roster.empty {
+    color: var(--muted);
+}
+
+.client-roster-row {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 12px;
+    border: 1px solid var(--stroke);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.68);
+}
+
+.client-roster-row.selected {
+    border-color: rgba(17, 107, 120, 0.45);
+    box-shadow: inset 0 0 0 1px rgba(17, 107, 120, 0.22);
+}
+
+.client-roster-label {
+    font-size: 0.82rem;
+    color: var(--muted);
+}
+
 .peer-row {
     display: grid;
     grid-template-columns: auto 1fr auto auto;
@@ -438,7 +477,8 @@ button:hover {
         flex-wrap: wrap;
     }
 
-    .peer-row {
+    .peer-row,
+    .client-roster-row {
         grid-template-columns: 1fr;
     }
 }

@@ -26,9 +26,13 @@
         serverPayloadInput: document.getElementById("serverPayloadInput"),
         sendServerDataButton: document.getElementById("sendServerDataButton"),
         clientStatus: document.getElementById("clientStatus"),
+        addClientButton: document.getElementById("addClientButton"),
+        removeClientButton: document.getElementById("removeClientButton"),
+        clientRoster: document.getElementById("clientRoster"),
         clientLobbyCodeInput: document.getElementById("clientLobbyCodeInput"),
         joinClientButton: document.getElementById("joinClientButton"),
         disconnectClientButton: document.getElementById("disconnectClientButton"),
+        activeClientName: document.getElementById("activeClientName"),
         clientLobbyCode: document.getElementById("clientLobbyCode"),
         clientSessionKey: document.getElementById("clientSessionKey"),
         clientPayloadInput: document.getElementById("clientPayloadInput"),
@@ -43,12 +47,15 @@
         savedReconnectKey: "",
         logCount: 0,
         server: createSocketState("server"),
-        client: createSocketState("client")
+        clients: new Map(),
+        nextClientId: 1,
+        activeClientId: 0
     };
 
     function createSocketState(role) {
         return {
             role,
+            clientId: 0,
             socket: null,
             sessionKey: "",
             lobbyCode: "",
@@ -57,8 +64,16 @@
             knownPeers: new Map(),
             pendingPeers: new Set(),
             acceptedPeers: new Set(),
+            statusClass: "idle",
+            statusLabel: "Idle",
             lastError: ""
         };
+    }
+
+    function createClientState(clientId) {
+        const socketState = createSocketState("client");
+        socketState.clientId = clientId;
+        return socketState;
     }
 
     initialize();
@@ -72,9 +87,19 @@
         elements.disconnectServerButton.addEventListener("click", function () {
             closeSocket(state.server, 1000, "Server closed from demo UI");
         });
+        elements.addClientButton.addEventListener("click", function () {
+            addClientSocket(true);
+        });
+        elements.removeClientButton.addEventListener("click", removeActiveClientSocket);
         elements.joinClientButton.addEventListener("click", connectAsClient);
         elements.disconnectClientButton.addEventListener("click", function () {
-            closeSocket(state.client, 1000, "Client closed from demo UI");
+            const clientState = getActiveClientState();
+            if (!clientState) {
+                showError("Select a client socket first.");
+                return;
+            }
+
+            closeSocket(clientState, 1000, "Client closed from demo UI");
         });
         elements.sendServerDataButton.addEventListener("click", sendServerData);
         elements.sendClientDataButton.addEventListener("click", sendClientData);
@@ -82,8 +107,76 @@
         elements.clearLogButton.addEventListener("click", clearLog);
         elements.hideHeartbeatCheckbox.addEventListener("change", updateHeartbeatVisibility);
 
+        addClientSocket(false);
+
         renderAll();
         log("system", "Demo ready. Configure the relay URL and application secret, then connect.", "success");
+    }
+
+    function getClientLabel(clientState) {
+        return "Client " + clientState.clientId;
+    }
+
+    function getSocketLogTag(socketState) {
+        if (socketState.role === "client") {
+            return "client-" + socketState.clientId;
+        }
+
+        return socketState.role;
+    }
+
+    function getActiveClientState() {
+        return state.clients.get(state.activeClientId) || null;
+    }
+
+    function addClientSocket(announce) {
+        const clientId = state.nextClientId;
+        state.nextClientId += 1;
+
+        const clientState = createClientState(clientId);
+        state.clients.set(clientId, clientState);
+
+        if (!state.activeClientId) {
+            state.activeClientId = clientId;
+        }
+
+        renderAll();
+
+        if (announce) {
+            log("system", getClientLabel(clientState) + " added.", "success");
+        }
+    }
+
+    function setActiveClient(clientId) {
+        if (!state.clients.has(clientId)) {
+            return;
+        }
+
+        state.activeClientId = clientId;
+        clearError();
+        renderAll();
+    }
+
+    function removeActiveClientSocket() {
+        const clientState = getActiveClientState();
+        if (!clientState) {
+            showError("No client socket is selected.");
+            return;
+        }
+
+        if (state.clients.size <= 1) {
+            showError("At least one client socket must remain.");
+            return;
+        }
+
+        closeSocket(clientState, 1000, getClientLabel(clientState) + " removed from demo UI", true);
+        state.clients.delete(clientState.clientId);
+
+        const nextClient = state.clients.values().next().value || null;
+        state.activeClientId = nextClient ? nextClient.clientId : 0;
+
+        renderAll();
+        log("system", getClientLabel(clientState) + " removed.");
     }
 
     function buildDefaultRelayUrl() {
@@ -131,18 +224,24 @@
     async function connectAsClient() {
         try {
             clearError();
+            const clientState = getActiveClientState();
+            if (!clientState) {
+                throw new Error("Select a client socket first.");
+            }
+
             const lobbyCode = normalizeLobbyCode(elements.clientLobbyCodeInput.value || state.savedLobbyCode);
 
             if (!lobbyCode) {
                 throw new Error("A lobby code is required to join as a client.");
             }
 
-            closeSocket(state.client, 1000, "Replacing existing client socket", true);
-            const ws = openSocket(toWebSocketUrl(getRelayBaseUrl()) + "/join/" + encodeURIComponent(lobbyCode), state.client);
-            state.client.lobbyCode = lobbyCode;
-            attachSocket(ws, state.client);
-            log("client", "Opening client socket for lobby " + lobbyCode + ".");
-            await waitForSocketOpen(ws, "client");
+            closeSocket(clientState, 1000, "Replacing existing client socket", true);
+            const ws = openSocket(toWebSocketUrl(getRelayBaseUrl()) + "/join/" + encodeURIComponent(lobbyCode), clientState);
+            clientState.lobbyCode = lobbyCode;
+            clientState.sessionKey = "";
+            attachSocket(ws, clientState);
+            log(getSocketLogTag(clientState), "Opening client socket for lobby " + lobbyCode + ".");
+            await waitForSocketOpen(ws, getClientLabel(clientState).toLowerCase());
             renderAll();
         } catch (error) {
             showError(formatError(error));
@@ -218,7 +317,7 @@
     }
 
     function openSocket(url, socketState) {
-        updateStatus(socketState.role, "connecting", "Connecting");
+        setSocketStatus(socketState, "connecting", "Connecting");
         return new WebSocket(url);
     }
 
@@ -226,8 +325,8 @@
         socketState.socket = ws;
 
         ws.addEventListener("open", function () {
-            log(socketState.role, "WebSocket open: " + ws.url, "success");
-            updateStatus(socketState.role, "connected", "Connected");
+            log(getSocketLogTag(socketState), "WebSocket open: " + ws.url, "success");
+            setSocketStatus(socketState, "connected", "Connected");
             startHeartbeat(socketState);
         });
 
@@ -235,20 +334,20 @@
             try {
                 await handleSocketMessage(socketState, event.data);
             } catch (error) {
-                showError(socketState.role + " message handling failed: " + formatError(error));
+                showError(getClientErrorPrefix(socketState) + " message handling failed: " + formatError(error));
             }
         });
 
         ws.addEventListener("error", function () {
             socketState.lastError = "Browser reported a WebSocket error.";
-            updateStatus(socketState.role, "error", "Error");
-            showError(socketState.role + " socket error.");
+            setSocketStatus(socketState, "error", "Error");
+            showError(getClientErrorPrefix(socketState) + " socket error.");
         });
 
         ws.addEventListener("close", function (event) {
             stopHeartbeat(socketState);
             const reason = event.reason || "No reason provided";
-            log(socketState.role, "Socket closed with code " + event.code + ": " + reason + ".");
+            log(getSocketLogTag(socketState), "Socket closed with code " + event.code + ": " + reason + ".");
 
             if (socketState.socket === ws) {
                 socketState.socket = null;
@@ -258,7 +357,7 @@
                 socketState.sessionKey = "";
             }
 
-            updateStatus(socketState.role, "idle", "Idle");
+            setSocketStatus(socketState, "idle", "Idle");
             renderAll();
         });
     }
@@ -269,7 +368,7 @@
         }
 
         if (rawData === "ping") {
-            log(socketState.role, "Received heartbeat ping. Sending pong.", "", { heartbeat: true });
+            log(getSocketLogTag(socketState), "Received heartbeat ping. Sending pong.", "", { heartbeat: true });
             if (socketState.socket && socketState.socket.readyState === WebSocket.OPEN) {
                 socketState.socket.send("pong");
             }
@@ -277,14 +376,14 @@
         }
 
         if (rawData === "pong") {
-            log(socketState.role, "Received heartbeat pong.", "", { heartbeat: true });
+            log(getSocketLogTag(socketState), "Received heartbeat pong.", "", { heartbeat: true });
             return;
         }
 
         if (rawData === "rate_limited") {
             socketState.lastError = "Relay rate limit exceeded.";
-            showError(socketState.role + " was rate limited by the relay.");
-            log(socketState.role, "Relay returned rate_limited.", "error");
+            showError(getClientErrorPrefix(socketState) + " was rate limited by the relay.");
+            log(getSocketLogTag(socketState), "Relay returned rate_limited.", "error");
             return;
         }
 
@@ -316,36 +415,36 @@
             if (secret) {
                 if (payload.msg === "inf") {
                     if (typeof payload.key !== "string" || !payload.key) {
-                        showError(socketState.role + " received an inf packet without a usable key.");
-                        log(socketState.role, "Invalid inf packet key: " + packet.pld, "error");
+                        showError(getClientErrorPrefix(socketState) + " received an inf packet without a usable key.");
+                        log(getSocketLogTag(socketState), "Invalid inf packet key: " + packet.pld, "error");
                         return;
                     }
 
                     const digestWithNewKey = await createMessageDigest(packet.pld, secret, payload.key);
                     if (digestWithNewKey !== packet.dgs) {
-                        showError(socketState.role + " received an inf packet whose digest did not match the new key.");
-                        log(socketState.role, "Digest mismatch for inf packet: " + packet.pld, "error");
+                        showError(getClientErrorPrefix(socketState) + " received an inf packet whose digest did not match the new key.");
+                        log(getSocketLogTag(socketState), "Digest mismatch for inf packet: " + packet.pld, "error");
                         return;
                     }
                 } else if (socketState.sessionKey) {
                     const digest = await createMessageDigest(packet.pld, secret, socketState.sessionKey);
                     if (digest !== packet.dgs) {
-                        showError(socketState.role + " received a packet whose digest did not verify.");
-                        log(socketState.role, "Digest mismatch for packet: " + packet.pld, "error");
+                        showError(getClientErrorPrefix(socketState) + " received a packet whose digest did not verify.");
+                        log(getSocketLogTag(socketState), "Digest mismatch for packet: " + packet.pld, "error");
                         return;
                     }
                 } else {
-                    log(socketState.role, "Skipping digest check because no session key is available for a non-inf packet.", "error");
+                    log(getSocketLogTag(socketState), "Skipping digest check because no session key is available for a non-inf packet.", "error");
                 }
             }
         }
 
-        log(socketState.role, "Packet " + payload.msg + " received: " + JSON.stringify(payload));
+        log(getSocketLogTag(socketState), "Packet " + payload.msg + " received: " + JSON.stringify(payload));
 
         if (socketState.role === "server") {
             await handleServerPayload(payload);
         } else {
-            await handleClientPayload(payload);
+            await handleClientPayload(socketState, payload);
         }
 
         renderAll();
@@ -389,10 +488,10 @@
         }
     }
 
-    async function handleClientPayload(payload) {
+    async function handleClientPayload(clientState, payload) {
         if (payload.msg === "inf") {
-            state.client.sessionKey = payload.key || "";
-            log("client", "Client session key received.", "success");
+            clientState.sessionKey = payload.key || "";
+            log(getSocketLogTag(clientState), "Client session key received.", "success");
             return;
         }
 
@@ -429,9 +528,14 @@
     async function sendClientData() {
         try {
             clearError();
+            const clientState = getActiveClientState();
+            if (!clientState) {
+                throw new Error("Select a client socket first.");
+            }
+
             const data = parseJsonField(elements.clientPayloadInput.value, "client payload");
-            await sendSignedPayloads(state.client, [{ msg: "dat", dat: data }]);
-            log("client", "Sent data packet from client.", "success");
+            await sendSignedPayloads(clientState, [{ msg: "dat", dat: data }]);
+            log(getSocketLogTag(clientState), "Sent data packet from client.", "success");
         } catch (error) {
             showError(formatError(error));
         }
@@ -573,14 +677,69 @@
     }
 
     function renderAll() {
+        const activeClient = getActiveClientState();
+
         elements.savedLobbyCode.textContent = state.savedLobbyCode || "-";
         elements.savedReconnectKey.textContent = state.savedReconnectKey || "-";
         elements.serverLobbyCode.textContent = state.server.lobbyCode || "-";
         elements.serverReconnectKey.textContent = state.server.reconnectKey || "-";
         elements.serverSessionKey.textContent = elideValue(state.server.sessionKey);
-        elements.clientLobbyCode.textContent = state.client.lobbyCode || "-";
-        elements.clientSessionKey.textContent = elideValue(state.client.sessionKey);
+        elements.activeClientName.textContent = activeClient ? getClientLabel(activeClient) : "-";
+        elements.clientLobbyCode.textContent = activeClient ? (activeClient.lobbyCode || "-") : "-";
+        elements.clientSessionKey.textContent = activeClient ? elideValue(activeClient.sessionKey) : "-";
+        elements.clientStatus.className = "status-badge " + (activeClient ? activeClient.statusClass : "idle");
+        elements.clientStatus.textContent = activeClient ? activeClient.statusLabel : "Idle";
+        elements.removeClientButton.disabled = state.clients.size <= 1;
+
+        renderClientRoster();
         renderPeerList();
+    }
+
+    function renderClientRoster() {
+        const entries = Array.from(state.clients.values()).sort(function (left, right) {
+            return left.clientId - right.clientId;
+        });
+
+        if (!entries.length) {
+            elements.clientRoster.className = "client-roster empty";
+            elements.clientRoster.textContent = "No client sockets created.";
+            return;
+        }
+
+        elements.clientRoster.className = "client-roster";
+        elements.clientRoster.innerHTML = "";
+
+        for (const clientState of entries) {
+            const row = document.createElement("div");
+            row.className = "client-roster-row" + (clientState.clientId === state.activeClientId ? " selected" : "");
+
+            const chip = document.createElement("span");
+            chip.className = "peer-chip";
+            chip.textContent = "C" + clientState.clientId;
+
+            const statusChip = document.createElement("span");
+            statusChip.className = "peer-chip";
+            statusChip.textContent = clientState.statusLabel;
+
+            const label = document.createElement("span");
+            label.className = "client-roster-label";
+            label.textContent = clientState.lobbyCode ? ("Lobby " + clientState.lobbyCode) : "Not joined";
+
+            const selectButton = document.createElement("button");
+            selectButton.type = "button";
+            selectButton.className = clientState.clientId === state.activeClientId ? "ghost-button" : "secondary-button";
+            selectButton.textContent = clientState.clientId === state.activeClientId ? "Selected" : "Select";
+            selectButton.disabled = clientState.clientId === state.activeClientId;
+            selectButton.addEventListener("click", function () {
+                setActiveClient(clientState.clientId);
+            });
+
+            row.appendChild(chip);
+            row.appendChild(statusChip);
+            row.appendChild(label);
+            row.appendChild(selectButton);
+            elements.clientRoster.appendChild(row);
+        }
     }
 
     function startHeartbeat(socketState) {
@@ -591,7 +750,7 @@
             }
 
             socketState.socket.send("ping");
-            log(socketState.role, "Heartbeat ping sent.", "", { heartbeat: true });
+            log(getSocketLogTag(socketState), "Heartbeat ping sent.", "", { heartbeat: true });
         }, HEARTBEAT_INTERVAL_MS);
     }
 
@@ -610,7 +769,7 @@
         }
 
         if (!silent) {
-            log(socketState.role, reason + ".");
+            log(getSocketLogTag(socketState), reason + ".");
         }
     }
 
@@ -695,10 +854,28 @@
         }).join("");
     }
 
-    function updateStatus(role, className, label) {
-        const badge = role === "server" ? elements.serverStatus : elements.clientStatus;
-        badge.className = "status-badge " + className;
-        badge.textContent = label;
+    function setSocketStatus(socketState, className, label) {
+        socketState.statusClass = className;
+        socketState.statusLabel = label;
+
+        if (socketState.role === "server") {
+            elements.serverStatus.className = "status-badge " + className;
+            elements.serverStatus.textContent = label;
+            return;
+        }
+
+        if (socketState.clientId === state.activeClientId) {
+            elements.clientStatus.className = "status-badge " + className;
+            elements.clientStatus.textContent = label;
+        }
+    }
+
+    function getClientErrorPrefix(socketState) {
+        if (socketState.role !== "client") {
+            return socketState.role;
+        }
+
+        return getClientLabel(socketState);
     }
 
     function log(tag, message, kind, options) {

@@ -162,6 +162,18 @@
                     <span id="clientStatus" class="status-badge idle">Idle</span>
                 </div>
 
+                <div class="action-row compact-actions client-instance-actions">
+                    <button id="addClientButton" type="button">Add client socket</button>
+                    <button id="removeClientButton" class="ghost-button" type="button">Remove selected socket</button>
+                </div>
+
+                <div class="subpanel client-roster-panel">
+                    <div class="subpanel-header">
+                        <h3>Client sockets on this page</h3>
+                    </div>
+                    <div id="clientRoster" class="client-roster empty">No client sockets created.</div>
+                </div>
+
                 <div class="field-row">
                     <label class="field grow">
                         <span>Lobby code</span>
@@ -174,6 +186,10 @@
                 </div>
 
                 <div class="info-grid client-info-grid">
+                    <article class="info-card">
+                        <span>Selected socket</span>
+                        <strong id="activeClientName">-</strong>
+                    </article>
                     <article class="info-card">
                         <span>Joined lobby</span>
                         <strong id="clientLobbyCode">-</strong>
@@ -204,7 +220,7 @@
                             If auto-accept is disabled, use the peer controls in the server section first.
                         </p>
                         <p class="note-block">
-                            Open multiple tabs to simulate multiple clients against the same lobby.
+                            Add client sockets above to simulate multiple peers without opening extra tabs.
                         </p>
                     </div>
                 </div>
