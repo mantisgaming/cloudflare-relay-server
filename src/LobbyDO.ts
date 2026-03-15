@@ -296,8 +296,9 @@ export class LobbyDO extends DurableObject<Env> {
 			return new Response("A server is already connected to this lobby", { status: 403 });
 		}
 
-		// Save the code
+		// Save the code and peer index in state
 		this.state.code = code;
+		this.state.nextPeer = 0;
 		this.saveState();
 		const randomCode = createRandomKey(2);
 
