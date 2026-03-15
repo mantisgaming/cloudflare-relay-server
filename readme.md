@@ -2,6 +2,10 @@
 
 Cloudflare Worker and Durable Object relay for TotSM real-time sessions. The relay creates short lobby codes, accepts one host server and multiple client peers per lobby, and forwards authenticated WebSocket packets between them.
 
+## Disclaimer
+
+The `demo-site/` implementation and this README were created with AI assistance.
+
 ## Overview
 
 This service is responsible for:
@@ -49,6 +53,10 @@ Each lobby has:
 |-- tsconfig.json                 # TypeScript configuration
 |-- worker-configuration.d.ts     # Cloudflare Worker environment typings
 |-- wrangler.jsonc                # Worker, DO, D1, routes, and env config
+|-- demo-site/
+|   |-- index.html                # Browser demo UI for relay flows
+|   |-- app.js                    # Demo websocket logic and packet signing
+|   `-- styles.css                # Demo styling
 `-- src/
     |-- Bucket.ts                 # Token-bucket utilities
     |-- CodeGeneratorDO.ts        # Lobby code generator durable object
@@ -77,11 +85,59 @@ npm install
 
 ### Useful scripts
 
-- `npm run dev` starts the Worker locally with scheduled events enabled and the `development` environment
+- `npm run predev` runs automatically before `npm run dev` and resets the local D1 schema
+- `npm run dev` starts the Worker locally with scheduled events enabled and the `development` environment (after running `predev`)
+- `npm run demo-site` serves `demo-site/` on `http://127.0.0.1:8080`
 - `npm run start` starts Wrangler dev without the explicit development env shortcut
 - `npm run deploy` deploys the Worker
 - `npm run cf-typegen` regenerates Cloudflare environment typings
-- `npm run reset-local-db` recreates the local D1 schema from `RELAY_D1_schema.sql`
+- `npm run reset-local-db` manually recreates the local D1 schema from `RELAY_D1_schema.sql`
+
+## Demo Site
+
+The `demo-site/` folder contains a browser-based protocol console for manually testing relay behavior.
+
+It supports:
+
+- Creating a lobby as the server
+- Joining a lobby as a client
+- Server reconnect using reconnect keys
+- Sending `dat` payloads from both sides
+- Auto-accepting new peers from the server view
+- Live event logging and optional incoming digest verification
+
+### Run the demo locally
+
+1. Start the relay Worker:
+
+```bash
+npm run dev
+```
+
+2. Ensure the Worker has a value for `HMAC_APPLICATION_SECRET` (required for signed packets):
+
+```bash
+npx wrangler secret put HMAC_APPLICATION_SECRET -e development
+```
+
+3. Serve the demo site from a second terminal:
+
+```bash
+npm run demo-site
+```
+
+4. Open `http://127.0.0.1:8080` and configure:
+
+- Relay URL: `http://127.0.0.1:8787/relay`
+- Application secret: the same hex secret you configured for `HMAC_APPLICATION_SECRET`
+
+### Quick validation flow
+
+1. Click **Create lobby as server**.
+2. Click **Join as client** (using the same lobby code).
+3. Send a `dat` payload from client and verify it appears on server.
+4. Send a `dat` payload from server and verify it appears on client.
+5. Disconnect server, click **Reconnect server**, and verify the lobby continues.
 
 ## HTTP API
 
