@@ -34,6 +34,7 @@
         clientPayloadInput: document.getElementById("clientPayloadInput"),
         sendClientDataButton: document.getElementById("sendClientDataButton"),
         errorBanner: document.getElementById("errorBanner"),
+        hideHeartbeatCheckbox: document.getElementById("hideHeartbeatCheckbox"),
         logOutput: document.getElementById("logOutput")
     };
 
@@ -79,6 +80,7 @@
         elements.sendClientDataButton.addEventListener("click", sendClientData);
         elements.refreshPeerListButton.addEventListener("click", renderPeerList);
         elements.clearLogButton.addEventListener("click", clearLog);
+        elements.hideHeartbeatCheckbox.addEventListener("change", updateHeartbeatVisibility);
 
         renderAll();
         log("system", "Demo ready. Configure the relay URL and application secret, then connect.", "success");
@@ -267,7 +269,7 @@
         }
 
         if (rawData === "ping") {
-            log(socketState.role, "Received heartbeat ping. Sending pong.");
+            log(socketState.role, "Received heartbeat ping. Sending pong.", "", { heartbeat: true });
             if (socketState.socket && socketState.socket.readyState === WebSocket.OPEN) {
                 socketState.socket.send("pong");
             }
@@ -275,7 +277,7 @@
         }
 
         if (rawData === "pong") {
-            log(socketState.role, "Received heartbeat pong.");
+            log(socketState.role, "Received heartbeat pong.", "", { heartbeat: true });
             return;
         }
 
@@ -589,7 +591,7 @@
             }
 
             socketState.socket.send("ping");
-            log(socketState.role, "Heartbeat ping sent.");
+            log(socketState.role, "Heartbeat ping sent.", "", { heartbeat: true });
         }, HEARTBEAT_INTERVAL_MS);
     }
 
@@ -699,9 +701,13 @@
         badge.textContent = label;
     }
 
-    function log(tag, message, kind) {
+    function log(tag, message, kind, options) {
+        const isHeartbeat = Boolean(options && options.heartbeat);
         const entry = document.createElement("div");
         entry.className = "log-entry" + (kind ? " " + kind : "");
+        if (isHeartbeat) {
+            entry.dataset.heartbeat = "true";
+        }
 
         const time = document.createElement("span");
         time.className = "log-time";
@@ -720,11 +726,23 @@
         entry.appendChild(body);
 
         elements.logOutput.appendChild(entry);
+        if (isHeartbeat && elements.hideHeartbeatCheckbox.checked) {
+            entry.style.display = "none";
+        }
         elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
 
         state.logCount += 1;
         while (elements.logOutput.childNodes.length > MAX_LOG_ENTRIES) {
             elements.logOutput.removeChild(elements.logOutput.firstChild);
+        }
+    }
+
+    function updateHeartbeatVisibility() {
+        const hideHeartbeat = elements.hideHeartbeatCheckbox.checked;
+        const heartbeatEntries = elements.logOutput.querySelectorAll('[data-heartbeat="true"]');
+
+        for (const heartbeatEntry of heartbeatEntries) {
+            heartbeatEntry.style.display = hideHeartbeat ? "none" : "";
         }
     }
 

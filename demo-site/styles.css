@@ -90,6 +90,10 @@ body::before {
     color: var(--muted);
 }
 
+.log-panel .toggle-row {
+    margin-top: 12px;
+}
+
 .hero h1 {
     margin: 10px 0 12px;
     font-size: clamp(2.4rem, 5vw, 4.8rem);

@@ -10,6 +10,7 @@ interface LobbyState {
 	joinBucket: Bucket.BucketState;
 	connectBucket: Bucket.BucketState;
 	reconnectBucket: Bucket.BucketState;
+	serverMessageQueue: [number, OmitUndefined<RelayMessagePayload.Data<"client-to-relay">>][];
 }
 
 type WebsocketMetadata = {
@@ -117,6 +118,7 @@ export class LobbyDO extends DurableObject<Env> {
 			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
 			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
 			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
+			serverMessageQueue: []
 		}
 
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -227,6 +229,7 @@ export class LobbyDO extends DurableObject<Env> {
 			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
 			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
 			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
+			serverMessageQueue: []
 		}
 
 		for (const socket of this.ctx.getWebSockets()) {
@@ -516,7 +519,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		const connectionPackets: RelayMessage[] = [];
 
-		for (const [pid, ws] of this.peers.entries()) {
+		for (const [pid] of this.peers.entries()) {
 			// Inform the server of the new connection
 			const connectPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
 				msg: "con",
@@ -535,8 +538,22 @@ export class LobbyDO extends DurableObject<Env> {
 			connectionPackets.push(connectPacket);
 		}
 
+		const queuedMessages: RelayMessage[] = [];
+
+		// Add any queued messages to the list of packets to send
+		for (const [pid, payload] of this.state.serverMessageQueue) {
+			const packedMessage = await this.packDataPayload(pid, payload);
+			if (packedMessage !== null) {
+				queuedMessages.push(packedMessage);
+			}
+		}
+
+		// Clear the server message queue since all messages will be sent to the server on reconnect
+		this.state.serverMessageQueue = [];
+		this.saveState();
+
 		// Send info to server
-		server.send(JSON.stringify([infoPacket, ...connectionPackets]));
+		server.send(JSON.stringify([infoPacket, ...connectionPackets, ...queuedMessages]));
 
 		// Log success
 		console.log(`Relay "${this.state.code}": Server connected to lobby`);
@@ -807,9 +824,23 @@ export class LobbyDO extends DurableObject<Env> {
 
 	// Forward data from a client to the server
 	private async forwardDataFromClient(pid: number, payload: RelayMessagePayload.Data<"client-to-relay">): Promise<void> {
-		// Ignore message if the server is not connected
-		if (this.server === null) {
+		const packedMessage = await this.packDataPayload(pid, payload);
+
+		// Queue message if the server is not connected
+		if (packedMessage === null) {
+			this.state.serverMessageQueue.push([pid, payload]);
+			this.saveState();
 			return;
+		}
+
+		// Send data message
+		this.server!.send(JSON.stringify([packedMessage]));
+	}
+
+	private async packDataPayload(pid: number, payload: OmitUndefined<RelayMessagePayload.Data<"client-to-relay">>): Promise<RelayMessage | null> {
+		// Ignore messages if the server is not connected
+		if (this.server === null) {
+			return null;
 		}
 
 		// Get server data
@@ -830,7 +861,6 @@ export class LobbyDO extends DurableObject<Env> {
 			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key)
 		};
 
-		// Send data message
-		this.server.send(JSON.stringify([message]));
+		return message;
 	}
 }
