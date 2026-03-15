@@ -238,10 +238,13 @@ async function sendPingsInLobbies(env: Env): Promise<void> {
     // Get all lobbies from the database
     const { results: lobbies } = await env.RELAY_D1.prepare("SELECT code FROM lobbies").all() as { results: LobbyRecord[] };
 
+    var pingPromises: Promise<void>[] = [];
+
     // Send ping messages in all lobbies to check for active connections
     for (const lobby of lobbies) {
         const code = lobby.code;
         const stub = env.LOBBY_DO.getByName(code) as DurableObjectStub<LobbyDO>;
-        stub.pingRoutine();
+        pingPromises.push(stub.pingRoutine());
     }
+    await Promise.all(pingPromises);
 }
