@@ -20,6 +20,8 @@
         serverLobbyCode: document.getElementById("serverLobbyCode"),
         serverReconnectKey: document.getElementById("serverReconnectKey"),
         serverSessionKey: document.getElementById("serverSessionKey"),
+        serverBadAppSecretCheckbox: document.getElementById("serverBadAppSecretCheckbox"),
+        serverBadSessionKeyCheckbox: document.getElementById("serverBadSessionKeyCheckbox"),
         peerList: document.getElementById("peerList"),
         refreshPeerListButton: document.getElementById("refreshPeerListButton"),
         serverDestinationsInput: document.getElementById("serverDestinationsInput"),
@@ -64,6 +66,8 @@
             knownPeers: new Map(),
             pendingPeers: new Set(),
             acceptedPeers: new Set(),
+            useBadAppSecretDigest: false,
+            useBadSessionKeyDigest: false,
             statusClass: "idle",
             statusLabel: "Idle",
             lastError: ""
@@ -106,6 +110,12 @@
         elements.refreshPeerListButton.addEventListener("click", renderPeerList);
         elements.clearLogButton.addEventListener("click", clearLog);
         elements.hideHeartbeatCheckbox.addEventListener("change", updateHeartbeatVisibility);
+        elements.serverBadAppSecretCheckbox.addEventListener("change", function () {
+            state.server.useBadAppSecretDigest = elements.serverBadAppSecretCheckbox.checked;
+        });
+        elements.serverBadSessionKeyCheckbox.addEventListener("change", function () {
+            state.server.useBadSessionKeyDigest = elements.serverBadSessionKeyCheckbox.checked;
+        });
 
         addClientSocket(false);
 
@@ -355,6 +365,8 @@
 
             if (socketState.role === "client") {
                 socketState.sessionKey = "";
+            } else {
+                clearServerPeerState();
             }
 
             setSocketStatus(socketState, "idle", "Idle");
@@ -463,7 +475,12 @@
         }
 
         if (payload.msg === "con") {
-            const peerId = Number(payload.pid);
+            const peerId = parsePeerId(payload.pid);
+            if (peerId === null) {
+                log("server", "Ignoring con packet with invalid peer id: " + JSON.stringify(payload), "error");
+                return;
+            }
+
             rememberPeer(peerId, "pending");
 
             if (elements.autoAcceptCheckbox.checked) {
@@ -473,7 +490,12 @@
         }
 
         if (payload.msg === "dsc") {
-            const peerId = Number(payload.pid);
+            const peerId = parsePeerId(payload.pid);
+            if (peerId === null) {
+                log("server", "Ignoring dsc packet with invalid peer id: " + JSON.stringify(payload), "error");
+                return;
+            }
+
             forgetPeer(peerId);
             log("server", "Peer " + peerId + " disconnected.");
             return;
@@ -486,6 +508,15 @@
             }
             return;
         }
+    }
+
+    function parsePeerId(value) {
+        const peerId = Number(value);
+        if (!Number.isInteger(peerId) || peerId < 0) {
+            return null;
+        }
+
+        return peerId;
     }
 
     async function handleClientPayload(clientState, payload) {
@@ -546,21 +577,50 @@
             throw new Error(socketState.role + " socket is not open.");
         }
 
-        const secret = getApplicationSecret(true);
+        const secret = getSigningSecret(socketState);
         if (!socketState.sessionKey) {
             throw new Error(socketState.role + " session key is not available yet.");
         }
+
+        const sessionKey = getSigningSessionKey(socketState);
 
         const packets = [];
         for (const payload of payloads) {
             const payloadString = JSON.stringify(payload);
             packets.push({
                 pld: payloadString,
-                dgs: await createMessageDigest(payloadString, secret, socketState.sessionKey)
+                dgs: await createMessageDigest(payloadString, secret, sessionKey)
             });
         }
 
         socketState.socket.send(JSON.stringify(packets));
+    }
+
+    function getSigningSecret(socketState) {
+        const correctSecret = getApplicationSecret(true);
+        if (!socketState.useBadAppSecretDigest) {
+            return correctSecret;
+        }
+
+        return mutateHexString(correctSecret);
+    }
+
+    function getSigningSessionKey(socketState) {
+        if (!socketState.useBadSessionKeyDigest) {
+            return socketState.sessionKey;
+        }
+
+        return mutateHexString(socketState.sessionKey);
+    }
+
+    function mutateHexString(value) {
+        if (!value) {
+            return "00";
+        }
+
+        const firstChar = value.charAt(0).toLowerCase();
+        const replacement = firstChar === "0" ? "1" : "0";
+        return replacement + value.slice(1);
     }
 
     function parseDestinations(value) {
@@ -616,6 +676,13 @@
         state.server.knownPeers.delete(peerId);
         state.server.pendingPeers.delete(peerId);
         state.server.acceptedPeers.delete(peerId);
+        renderPeerList();
+    }
+
+    function clearServerPeerState() {
+        state.server.knownPeers.clear();
+        state.server.pendingPeers.clear();
+        state.server.acceptedPeers.clear();
         renderPeerList();
     }
 
@@ -684,6 +751,8 @@
         elements.serverLobbyCode.textContent = state.server.lobbyCode || "-";
         elements.serverReconnectKey.textContent = state.server.reconnectKey || "-";
         elements.serverSessionKey.textContent = elideValue(state.server.sessionKey);
+        elements.serverBadAppSecretCheckbox.checked = state.server.useBadAppSecretDigest;
+        elements.serverBadSessionKeyCheckbox.checked = state.server.useBadSessionKeyDigest;
         elements.activeClientName.textContent = activeClient ? getClientLabel(activeClient) : "-";
         elements.clientLobbyCode.textContent = activeClient ? (activeClient.lobbyCode || "-") : "-";
         elements.clientSessionKey.textContent = activeClient ? elideValue(activeClient.sessionKey) : "-";
@@ -734,10 +803,39 @@
                 setActiveClient(clientState.clientId);
             });
 
+            const digestControls = document.createElement("div");
+            digestControls.className = "client-digest-controls";
+
+            const badSecretLabel = document.createElement("label");
+            badSecretLabel.className = "digest-toggle";
+            const badSecretCheckbox = document.createElement("input");
+            badSecretCheckbox.type = "checkbox";
+            badSecretCheckbox.checked = clientState.useBadAppSecretDigest;
+            badSecretCheckbox.addEventListener("change", function () {
+                clientState.useBadAppSecretDigest = badSecretCheckbox.checked;
+            });
+            badSecretLabel.appendChild(badSecretCheckbox);
+            badSecretLabel.appendChild(document.createTextNode("Bad app secret digest"));
+
+            const badSessionLabel = document.createElement("label");
+            badSessionLabel.className = "digest-toggle";
+            const badSessionCheckbox = document.createElement("input");
+            badSessionCheckbox.type = "checkbox";
+            badSessionCheckbox.checked = clientState.useBadSessionKeyDigest;
+            badSessionCheckbox.addEventListener("change", function () {
+                clientState.useBadSessionKeyDigest = badSessionCheckbox.checked;
+            });
+            badSessionLabel.appendChild(badSessionCheckbox);
+            badSessionLabel.appendChild(document.createTextNode("Bad session key digest"));
+
+            digestControls.appendChild(badSecretLabel);
+            digestControls.appendChild(badSessionLabel);
+
             row.appendChild(chip);
             row.appendChild(statusChip);
             row.appendChild(label);
             row.appendChild(selectButton);
+            row.appendChild(digestControls);
             elements.clientRoster.appendChild(row);
         }
     }

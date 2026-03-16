@@ -30,7 +30,7 @@ VALUES
 CREATE TRIGGER lobby_update
 AFTER UPDATE ON lobbies
 BEGIN
-    UPDATE lobbies SET last_updated = unixepoch();
+    UPDATE lobbies SET last_updated = unixepoch() WHERE code = NEW.code;
 END;
 
 -- Create trigger to prevent banned codes from being created

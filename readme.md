@@ -310,7 +310,7 @@ The fields present on a payload depend on who sends it.
 - Server and client sockets have independent message rate limits
 - Binary frames are rejected
 - Oversized messages are rejected when they exceed `MAXIMUM_MESSAGE_SIZE` kilobytes
-- Connections are closed after roughly 15 seconds without a valid message or ping response
+- Connections are closed after roughly 15 seconds without a valid message or incoming heartbeat
 - Idle sockets are closed after roughly 30 minutes
 - A scheduled task cleans up stale lobbies and sends heartbeat pings
 

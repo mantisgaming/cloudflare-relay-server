@@ -293,6 +293,10 @@ button:hover {
     color: var(--muted);
 }
 
+.compact-toggle-row {
+    margin-top: 0;
+}
+
 .toggle-row input {
     width: 18px;
     height: 18px;
@@ -363,6 +367,39 @@ button:hover {
 .client-roster-label {
     font-size: 0.82rem;
     color: var(--muted);
+}
+
+.digest-control-grid {
+    margin-top: 12px;
+    display: grid;
+    gap: 8px;
+}
+
+.client-digest-controls {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.digest-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 0.78rem;
+}
+
+.digest-toggle input {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+}
+
+#sendServerDataButton,
+#sendClientDataButton {
+    margin-top: 12px;
 }
 
 .peer-row {
@@ -506,5 +543,9 @@ button:hover {
 
     button {
         width: 100%;
+    }
+
+    .client-digest-controls {
+        grid-template-columns: 1fr;
     }
 }

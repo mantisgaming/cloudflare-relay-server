@@ -134,6 +134,16 @@
   "message": "Hello from the relay host"
 }</textarea>
                             </label>
+                            <div class="digest-control-grid">
+                                <label class="toggle-row compact-toggle-row">
+                                    <input id="serverBadAppSecretCheckbox" type="checkbox">
+                                    <span>Sign with incorrect application secret</span>
+                                </label>
+                                <label class="toggle-row compact-toggle-row">
+                                    <input id="serverBadSessionKeyCheckbox" type="checkbox">
+                                    <span>Sign with incorrect session key</span>
+                                </label>
+                            </div>
                             <button id="sendServerDataButton" class="secondary-button" type="button">Send `dat` from server</button>
                         </div>
                     </div>

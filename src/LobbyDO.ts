@@ -171,7 +171,7 @@ export class LobbyDO extends DurableObject<Env> {
 		await this.refreshSockets();
 
 		// If the lobby has been removed from the database, it should be reset
-		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.state.code).all();
+		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.state.code).first();
 		if (!existingLobby) {
 			this.reset();
 		}
@@ -570,7 +570,7 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	/** Any websocket message will call this function */
-	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
 		// Get the websocket data and update its last active time
 		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
 		wsData.lastActiveTime = Date.now();
@@ -625,20 +625,46 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		// Parse data
-		const messageDataArray = JSON.parse(message) as RelayMessage[];
+		var data: any;
+		
+		try {
+		data = JSON.parse(message) as any;
+		} catch (e) {
+			ws.close(1007, "Malformed JSON");
+			return;
+		}
+
+		// Validate that the message is an array of packets
+		if (!Array.isArray(data)) {
+			ws.close(1007, "Expected message to be an array of packets");
+			return;
+		}
+
+		// Ignore empty messages
+		if (data.length === 0) {
+			return;
+		}
+
+		const messageDataArray = data as any[];
 
 		for (const messageData of messageDataArray) {
+			// Validate message format
+			if (messageData.pld === undefined || messageData.dgs === undefined) {
+				ws.close(1007, "Malformed message packet");
+				return;
+			}
+
 			// Check hmac
-			if (!verifyMessageDigest(messageData, this.env.HMAC_APPLICATION_SECRET, wsData.key)) {
+			if (!await verifyMessageDigest(messageData, this.env.HMAC_APPLICATION_SECRET, wsData.key)) {
 				ws.close(1007, "HMAC Digest Did Not Match");
 				return;
 			}
 
 			// Call corresponding event handler
 			if (wsData.isServer) {
-				this.onServerMessage(messageData);
+				await this.onServerMessage(messageData);
 			} else {
-				this.onClientMessage(wsData.peerID, messageData);
+				await this.onClientMessage(wsData.peerID, messageData);
 			}
 		}
 	}
@@ -684,7 +710,7 @@ export class LobbyDO extends DurableObject<Env> {
 		// Handle the message based on its type
 		switch (payload.msg) {
 			case "dat":
-				this.forwardDataFromServer(payload);
+				await this.forwardDataFromServer(payload);
 				break;
 
 			case "dsc":
