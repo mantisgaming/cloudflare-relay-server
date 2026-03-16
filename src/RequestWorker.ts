@@ -167,14 +167,22 @@ export const RequestWorker: ExportedHandler<Env> = {
         return result;
     },
     async scheduled(cont, env, ctx): Promise<void> {
-        // Scheduler gets called every 5 seconds
-        await cleanupLobbies(env).catch((err) => {
-            console.error(`Worker: Error during scheduled cleanup: ${err.message}`);
-        });
-
-        await sendPingsInLobbies(env).catch((err) => {
-            console.error(`Worker: Error during scheduled ping: ${err.message}`);
-        });
+        switch (cont.cron) {
+            case "* * * * *": // Every minute
+                // Send pings in all lobbies to check for active connections and update their status
+                await sendPingsInLobbies(env).catch((err) => {
+                    console.error(`Worker: Error during scheduled ping: ${err.message}`);
+                });
+                break;
+            case "*/5 * * * *": // Every 5 minutes
+                // Clean up old lobbies that have been inactive for too long or never had a successful connection
+                await cleanupLobbies(env).catch((err) => {
+                    console.error(`Worker: Error during scheduled cleanup: ${err.message}`);
+                });
+                break;
+            default:
+                console.warn(`Worker: Unknown cron schedule "${cont.cron}"`);
+        }
     }
 } satisfies ExportedHandler<Env>;
 
