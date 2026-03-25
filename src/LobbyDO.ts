@@ -153,17 +153,17 @@ export class LobbyDO extends DurableObject<Env> {
 
 		for (const socket of this.ctx.getWebSockets()) {
 			const socketData = socket.deserializeAttachment() as WebsocketMetadata;
-			const lastAction = socketData.lastActiveTime;
-			const lastMessage = Math.max(
-				socketData.lastMessageTime,
+			const lastMessage = socketData.lastMessageTime;
+			const lastActive = Math.max(
+				socketData.lastActiveTime,
 				this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0
 			);
 
 			const now = Date.now();
 
-			if (now - lastMessage > 1000 * 15) {
+			if (now - lastActive > 1000 * 15) {
 				socket.close(1000, "Connection Timed Out");
-			} else if (now - lastAction > 1000 * 60 * 30) {
+			} else if (now - lastMessage > 1000 * 60 * 30) {
 				socket.close(1000, "Connection Idle");
 			}
 		}
@@ -574,7 +574,6 @@ export class LobbyDO extends DurableObject<Env> {
 		// Get the websocket data and update its last active time
 		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
 		wsData.lastActiveTime = Date.now();
-
 		ws.serializeAttachment(wsData);
 
 		// Run cleanup routine
@@ -602,6 +601,9 @@ export class LobbyDO extends DurableObject<Env> {
 		if (message === "pong") {
 			return;
 		}
+
+		wsData.lastMessageTime = Date.now();
+		ws.serializeAttachment(wsData);
 
 		// Check rate limiter
 		const pass = Bucket.acquireToken(
