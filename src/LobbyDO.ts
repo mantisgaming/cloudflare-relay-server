@@ -161,9 +161,13 @@ export class LobbyDO extends DurableObject<Env> {
 
 			const now = Date.now();
 
+			console.log(`Websocket last active: ${socketData.lastActiveTime}\nlast ping: ${socketData.lastMessageTime}`)
+
 			if (now - lastMessage > 1000 * 15) {
+				console.log(`Kicking websocket for timeout`);
 				socket.close(1000, "Connection Timed Out");
 			} else if (now - lastAction > 1000 * 60 * 30) {
+				console.log(`Kicking websocket for idle`);
 				socket.close(1000, "Connection Idle");
 			}
 		}

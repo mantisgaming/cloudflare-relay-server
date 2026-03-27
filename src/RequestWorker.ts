@@ -235,6 +235,7 @@ async function cleanupLobbies(env: Env): Promise<void> {
 
     // Cleanup the corresponding Durable Objects
     for (const lobby of lobbies) {
+        console.log(`Resetting lobby "${lobby.code}"`);
         const code = lobby.code;
         const stub = env.LOBBY_DO.getByName(code) as DurableObjectStub<LobbyDO>;
         resetPromises.push(stub.reset());
@@ -250,6 +251,7 @@ async function sendPingsInLobbies(env: Env): Promise<void> {
 
     // Send ping messages in all lobbies to check for active connections
     for (const lobby of lobbies) {
+        console.log(`Sending pings for lobby "${lobby.code}"`);
         const code = lobby.code;
         const stub = env.LOBBY_DO.getByName(code) as DurableObjectStub<LobbyDO>;
         pingPromises.push(stub.pingRoutine());
