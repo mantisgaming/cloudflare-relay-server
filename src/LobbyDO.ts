@@ -161,13 +161,9 @@ export class LobbyDO extends DurableObject<Env> {
 
 			const now = Date.now();
 
-			console.log(`Websocket last active: ${socketData.lastActiveTime}\nlast ping: ${socketData.lastMessageTime} as of ${now}`);
-
 			if (now - lastActive > 1000 * 15) {
-				console.log(`Kicking websocket for timeout`);
 				socket.close(1000, "Connection Timed Out");
 			} else if (now - lastMessage > 1000 * 60 * 30) {
-				console.log(`Kicking websocket for idle`);
 				socket.close(1000, "Connection Idle");
 			}
 		}
@@ -175,7 +171,10 @@ export class LobbyDO extends DurableObject<Env> {
 		await this.refreshSockets();
 
 		// If the lobby has been removed from the database, it should be reset
-		const existingLobby = await this.env.RELAY_D1.prepare("SELECT * FROM lobbies WHERE code = ?").bind(this.state.code).first();
+		const existingLobby = await this.env.RELAY_D1.prepare(
+			"SELECT * FROM lobbies WHERE code = ?"
+		).bind(this.state.code).first();
+
 		if (!existingLobby) {
 			this.reset();
 		}
