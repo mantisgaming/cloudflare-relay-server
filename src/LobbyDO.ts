@@ -10,7 +10,14 @@ interface LobbyState {
 	joinBucket: Bucket.BucketState;
 	connectBucket: Bucket.BucketState;
 	reconnectBucket: Bucket.BucketState;
-	serverMessageQueue: [number, OmitUndefined<RelayMessagePayload.Data<"client-to-relay">>][];
+	serverMessageQueue: {
+		pid: number,
+		payload: OmitUndefined<RelayMessagePayload.Data<"client-to-relay">>
+	}[];
+	websocketData: {
+		socketUID: string,
+		data: WebsocketMetadata
+	}[];
 }
 
 type WebsocketMetadata = {
@@ -118,7 +125,8 @@ export class LobbyDO extends DurableObject<Env> {
 			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
 			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
 			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
-			serverMessageQueue: []
+			serverMessageQueue: [],
+			websocketData: []
 		}
 
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -141,7 +149,7 @@ export class LobbyDO extends DurableObject<Env> {
 					]
 				)
 			)
-		)
+		);
 	}
 
 	private saveStateValue<T extends keyof LobbyState>(...keys: T[]): void {
@@ -158,7 +166,7 @@ export class LobbyDO extends DurableObject<Env> {
 					]
 				)
 			)
-		)
+		);
 	}
 
 	/** Load the state of the durable object */
@@ -176,11 +184,21 @@ export class LobbyDO extends DurableObject<Env> {
 			lastCleanup: Date.now()
 		});
 
+		var activeSockets: Set<string> = new Set();
+
 		for (const socket of this.ctx.getWebSockets()) {
-			const socketData = socket.deserializeAttachment() as WebsocketMetadata;
-			const lastMessage = socketData.lastMessageTime;
+			const socketID = socket.deserializeAttachment() as string;
+			const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)?.data;
+			activeSockets.add(socketID);
+
+			if (wsData === undefined) {
+				socket.close(1000, "Socket does not have metadata");
+				continue;
+			}
+
+			const lastMessage = wsData.lastMessageTime;
 			const lastActive = Math.max(
-				socketData.lastActiveTime,
+				wsData.lastActiveTime,
 				this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0
 			);
 
@@ -193,6 +211,52 @@ export class LobbyDO extends DurableObject<Env> {
 			}
 		}
 
+		// Check if there are any missing websockets
+		for (const entry of this.state.websocketData) {
+			// Skip sockets that were found
+			if (activeSockets.has(entry.socketUID)) {
+				continue;
+			}
+
+			// remove the websocket data
+			this.state.websocketData.splice(this.state.websocketData.findIndex(e => e === entry), 1);
+
+			// if it is the server, handle it
+			if (entry.data.isServer) {
+				this.server = null;
+				continue;
+			}
+
+			// If there is no server, nothing left to do
+			if (this.server === null) {
+				continue;
+			}
+
+			// Tell the server the client is disconnected
+			const serverSocketID = this.server.deserializeAttachment() as string;
+			const serverData = this.state.websocketData.find(entry => entry.socketUID === serverSocketID)!.data;
+
+			// Create disconnect payload
+			const payload: RelayMessagePayload.Disconnect<"relay-to-server"> = {
+				msg: "dsc",
+				pid: entry.data.peerID
+			};
+
+			const stringPayload = JSON.stringify(payload);
+
+			// Create disconnect message
+			const message: RelayMessage = {
+				dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key),
+				pld: stringPayload
+			};
+
+			// Send disconnect message
+			this.server.send(JSON.stringify([message]));
+		}
+
+		this.saveStateValue("websocketData");
+
+		// Update the in-memory socket maps
 		await this.refreshSockets();
 
 		// If the lobby has been removed from the database, it should be reset
@@ -205,18 +269,22 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 	}
 
+	/**
+	 * Reloads the in-memory websocket mapping
+	 */
 	private async refreshSockets(): Promise<void> {
 		this.server = null;
 		this.peers = new Map();
 
 		for (const ws of this.ctx.getWebSockets()) {
-			const data = ws.deserializeAttachment() as WebsocketMetadata;
-			if (data === undefined) {
+			const socketID = ws.deserializeAttachment() as string;
+			const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
+			if (wsData === undefined) {
 				ws.close(1008, "Missing WebSocket attachment");
 				return;
 			}
 
-			if (data.isServer) {
+			if (wsData.isServer) {
 				if (this.server != null) {
 					console.warn("Multiple websockets marked as server");
 					ws.close(1008, "Socket appears to be duplicate server");
@@ -224,10 +292,10 @@ export class LobbyDO extends DurableObject<Env> {
 					this.server = ws;
 				}
 			} else {
-				this.peers.set(data.peerID, ws);
+				this.peers.set(wsData.peerID, ws);
 			}
 		}
-		
+
 		if (this.state.code === null)
 			return;
 
@@ -353,7 +421,14 @@ export class LobbyDO extends DurableObject<Env> {
 			lastMessageTime: Date.now(),
 			bucket: Bucket.createDefaultState(this.serverBucketParams)
 		};
-		server.serializeAttachment(serverWSData);
+
+		const newServerSocketID = crypto.randomUUID();
+		server.serializeAttachment(newServerSocketID);
+		this.state.websocketData.push({
+			socketUID: newServerSocketID,
+			data: serverWSData
+		});
+		this.saveStateValue("websocketData");
 
 		// Send the lobby code to the server
 		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
@@ -425,11 +500,19 @@ export class LobbyDO extends DurableObject<Env> {
 			lastMessageTime: Date.now(),
 			bucket: Bucket.createDefaultState(this.peerBucketParams)
 		};
-		server.serializeAttachment(peerWSData);
+
+		const newSocketID = crypto.randomUUID();
+		server.serializeAttachment(newSocketID);
+		this.state.websocketData.push({
+			socketUID: newSocketID,
+			data: peerWSData
+		});
+		this.saveStateValue("websocketData");
 
 		console.log(`Relay "${this.state.code}": Client "${id}" connected to lobby`);
 
-		const serverWSData: WebsocketMetadata = this.server.deserializeAttachment();
+		const serverID = this.server.deserializeAttachment() as string;
+		const serverWSData = this.state.websocketData.find(entry => entry.socketUID === serverID)!.data;
 
 		// Inform the server of the new connection
 		const connectPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
@@ -526,7 +609,14 @@ export class LobbyDO extends DurableObject<Env> {
 			lastMessageTime: Date.now(),
 			bucket: Bucket.createDefaultState(this.serverBucketParams)
 		};
-		server.serializeAttachment(serverWSData);
+
+		const newServerSocketID = crypto.randomUUID();
+		server.serializeAttachment(newServerSocketID);
+		this.state.websocketData.push({
+			socketUID: newServerSocketID,
+			data: serverWSData
+		});
+		this.saveStateValue("websocketData");
 
 		// Send the lobby code to the server
 		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
@@ -568,7 +658,7 @@ export class LobbyDO extends DurableObject<Env> {
 		const queuedMessages: RelayMessage[] = [];
 
 		// Add any queued messages to the list of packets to send
-		for (const [pid, payload] of this.state.serverMessageQueue) {
+		for (const { pid, payload } of this.state.serverMessageQueue) {
 			const packedMessage = await this.packDataPayload(pid, payload);
 			if (packedMessage !== null) {
 				queuedMessages.push(packedMessage);
@@ -600,9 +690,10 @@ export class LobbyDO extends DurableObject<Env> {
 	/** Any websocket message will call this function */
 	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
 		// Get the websocket data and update its last active time
-		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
+		const socketID = ws.deserializeAttachment() as string;
+		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 		wsData.lastActiveTime = Date.now();
-		ws.serializeAttachment(wsData);
+		this.saveStateValue("websocketData");
 
 		// Run cleanup routine
 		this.cleanup();
@@ -631,7 +722,6 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		wsData.lastMessageTime = Date.now();
-		ws.serializeAttachment(wsData);
 
 		// Check rate limiter
 		const pass = Bucket.acquireToken(
@@ -645,7 +735,7 @@ export class LobbyDO extends DurableObject<Env> {
 		);
 
 		// Save rate limiter state
-		ws.serializeAttachment(wsData);
+		this.saveStateValue("websocketData");
 
 		// If rate limiter fails send failure response
 		if (!pass) {
@@ -656,9 +746,9 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Parse data
 		var data: any;
-		
+
 		try {
-		data = JSON.parse(message) as any;
+			data = JSON.parse(message) as any;
 		} catch (e) {
 			ws.close(1007, "Malformed JSON");
 			return;
@@ -701,7 +791,8 @@ export class LobbyDO extends DurableObject<Env> {
 
 	webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void {
 		// Get the websocket data
-		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
+		const socketID = ws.deserializeAttachment() as string;
+		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 
 		// Run cleanup routine
 		this.cleanup();
@@ -720,7 +811,8 @@ export class LobbyDO extends DurableObject<Env> {
 
 	webSocketError(ws: WebSocket, error: unknown): void {
 		// Get the websocket data
-		const wsData = ws.deserializeAttachment() as WebsocketMetadata;
+		const socketID = ws.deserializeAttachment() as string;
+		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 
 		// Run cleanup routine
 		this.cleanup();
@@ -759,7 +851,8 @@ export class LobbyDO extends DurableObject<Env> {
 				}
 
 				// Get client socket info
-				const clientWSData = clientWS.deserializeAttachment() as WebsocketMetadata;
+				const socketID = clientWS.deserializeAttachment() as string;
+				const clientWSData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 
 				// Create the payload
 				const infoPayload: OmitUndefined<RelayMessagePayload.Info<"relay-to-client">> = {
@@ -816,7 +909,8 @@ export class LobbyDO extends DurableObject<Env> {
 		if (this.server === null)
 			return;
 
-		const serverData: WebsocketMetadata = this.server.deserializeAttachment();
+		const serverSocketID = this.server.deserializeAttachment() as string;
+		const serverData = this.state.websocketData.find(entry => entry.socketUID === serverSocketID)!.data;
 
 		// Create disconnect payload
 		const payload: RelayMessagePayload.Disconnect<"relay-to-server"> = {
@@ -859,7 +953,8 @@ export class LobbyDO extends DurableObject<Env> {
 			if (!payload.dst.includes(pid))
 				continue;
 
-			const peerData = socket.deserializeAttachment() as WebsocketMetadata;
+			const socketID = socket.deserializeAttachment() as string;
+			const peerData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 
 			// Create data payload
 			const newPayload: OmitUndefined<RelayMessagePayload.Data<"relay-to-client">> = {
@@ -884,7 +979,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Queue message if the server is not connected
 		if (packedMessage === null) {
-			this.state.serverMessageQueue.push([pid, payload]);
+			this.state.serverMessageQueue.push({ pid, payload });
 			this.saveStateValue("serverMessageQueue");
 			return;
 		}
@@ -900,7 +995,8 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		// Get server data
-		const serverData = this.server.deserializeAttachment() as WebsocketMetadata;
+		const serverSocketID = this.server.deserializeAttachment() as string;
+		const serverData = this.state.websocketData.find(entry => entry.socketUID === serverSocketID)!.data;
 
 		// Create data payload
 		const newPayload: OmitUndefined<RelayMessagePayload.Data<"relay-to-server">> = {
