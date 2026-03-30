@@ -36,11 +36,7 @@ type WebsocketMetadata = {
 
 // Durable Object for relaying a WebSocket lobby between a server and multiple clients
 export class LobbyDO extends DurableObject<Env> {
-	private readonly _state: LobbyState;
-
-	private get state() {
-		return this._state;
-	}
+	private readonly state: LobbyState;
 
 	private server: WebSocket | null = null;
 	private peers: Map<number, WebSocket> = new Map();
@@ -114,7 +110,7 @@ export class LobbyDO extends DurableObject<Env> {
 			fillRate: env.RATE_LIMITER_LOBBY_RECONNECT_RATE
 		}
 
-		this._state = {
+		this.state = {
 			code: null,
 			nextPeer: 0,
 			lastCleanup: Date.now(),
@@ -134,7 +130,7 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	private setState(state: Partial<LobbyState>): void {
-		Object.assign(this._state, state);
+		Object.assign(this.state, state);
 
 		this.ctx.storage.put(
 			Object.fromEntries(
@@ -168,7 +164,7 @@ export class LobbyDO extends DurableObject<Env> {
 	/** Load the state of the durable object */
 	private async loadState(): Promise<void> {
 		const loadedState = await this.ctx.storage.get(Object.keys(this.state));
-		Object.assign(this._state, Object.fromEntries(loadedState.entries()));
+		Object.assign(this.state, Object.fromEntries(loadedState.entries()));
 	}
 
 	/** Remove any websockets that have not responded recently */
