@@ -328,18 +328,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 	/** Reset the durable object */
 	reset(): void {
-		this.server = null;
-		this.peers = new Map();
-		this.setState({
-			code: this.state.code,
-			nextPeer: 0,
-			lastCleanup: Date.now(),
-			requestBucket: Bucket.createDefaultState(this.requestBucketParams),
-			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
-			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
-			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
-			serverMessageQueue: []
-		});
+		this.ctx.storage.deleteAll();
 
 		for (const socket of this.ctx.getWebSockets()) {
 			socket.close(1012, "Lobby Reset");
