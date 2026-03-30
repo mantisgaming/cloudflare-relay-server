@@ -172,7 +172,14 @@ export class LobbyDO extends DurableObject<Env> {
 	/** Load the state of the durable object */
 	private async loadState(): Promise<void> {
 		const loadedState = await this.ctx.storage.get(Object.keys(this.state));
-		Object.assign(this.state, Object.fromEntries(loadedState.entries()));
+		const entries: [string, any][] = []
+		for (const entry of loadedState.entries()) {
+			entries.push([
+				entry[0],
+				JSON.parse(entry[1] as string)
+			])
+		}
+		Object.assign(this.state, Object.fromEntries(entries));
 	}
 
 	/** Remove any websockets that have not responded recently */
@@ -224,8 +231,14 @@ export class LobbyDO extends DurableObject<Env> {
 			// if it is the server, handle it
 			if (entry.data.isServer) {
 				this.server = null;
+				
+				// log disconnect
+				console.log(`Relay "${this.state.code}": Server websocket vanished`);
 				continue;
 			}
+
+			// log disconnect
+			console.log(`Relay "${this.state.code}": Client "${entry.data.peerID}" websocket vanished`);
 
 			// If there is no server, nothing left to do
 			if (this.server === null) {
