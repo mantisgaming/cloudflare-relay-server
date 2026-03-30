@@ -36,7 +36,11 @@ type WebsocketMetadata = {
 
 // Durable Object for relaying a WebSocket lobby between a server and multiple clients
 export class LobbyDO extends DurableObject<Env> {
-	private state: LobbyState;
+	private readonly _state: LobbyState;
+
+	private get state() {
+		return this._state;
+	}
 
 	private server: WebSocket | null = null;
 	private peers: Map<number, WebSocket> = new Map();
@@ -110,7 +114,7 @@ export class LobbyDO extends DurableObject<Env> {
 			fillRate: env.RATE_LIMITER_LOBBY_RECONNECT_RATE
 		}
 
-		this.state = {
+		this._state = {
 			code: null,
 			nextPeer: 0,
 			lastCleanup: Date.now(),
@@ -129,18 +133,42 @@ export class LobbyDO extends DurableObject<Env> {
 		}).bind(this));
 	}
 
-	/** Save the state of the durable object */
-	private saveState(): void {
-		this.ctx.storage.put("state", this.state)
+	private setState(state: Partial<LobbyState>): void {
+		Object.assign(this._state, state);
+
+		this.ctx.storage.put(
+			Object.fromEntries(
+				Object.entries(state).map(
+					val => [
+						val[0],
+						JSON.stringify(val[1])
+					]
+				)
+			)
+		)
+	}
+
+	private saveStateValue<T extends keyof LobbyState>(...keys: T[]): void {
+		this.ctx.storage.put(
+			Object.fromEntries(
+				Object.entries(this.state).filter(
+					val => keys.find(
+						key => key === val[0]
+					) !== undefined
+				).map(
+					val => [
+						val[0],
+						JSON.stringify(val[1])
+					]
+				)
+			)
+		)
 	}
 
 	/** Load the state of the durable object */
 	private async loadState(): Promise<void> {
-		const loadedState = await this.ctx.storage.get("state") as LobbyState
-		this.state = {
-			...this.state,
-			...loadedState
-		};
+		const loadedState = await this.ctx.storage.get(Object.keys(this.state));
+		Object.assign(this._state, Object.fromEntries(loadedState.entries()));
 	}
 
 	/** Remove any websockets that have not responded recently */
@@ -148,8 +176,9 @@ export class LobbyDO extends DurableObject<Env> {
 		if (Date.now() - this.state.lastCleanup < 1000 * 1)
 			return;
 
-		this.state.lastCleanup = Date.now();
-		this.saveState();
+		this.setState({
+			lastCleanup: Date.now()
+		});
 
 		for (const socket of this.ctx.getWebSockets()) {
 			const socketData = socket.deserializeAttachment() as WebsocketMetadata;
@@ -224,7 +253,7 @@ export class LobbyDO extends DurableObject<Env> {
 	reset(): void {
 		this.server = null;
 		this.peers = new Map();
-		this.state = {
+		this.setState({
 			code: this.state.code,
 			nextPeer: 0,
 			lastCleanup: Date.now(),
@@ -233,13 +262,11 @@ export class LobbyDO extends DurableObject<Env> {
 			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
 			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
 			serverMessageQueue: []
-		}
+		});
 
 		for (const socket of this.ctx.getWebSockets()) {
 			socket.close(1012, "Lobby Reset");
 		}
-
-		this.saveState();
 	}
 
 	async pingRoutine(): Promise<void> {
@@ -254,7 +281,7 @@ export class LobbyDO extends DurableObject<Env> {
 	async fetch(request: Request): Promise<Response> {
 		// Rate limiter
 		const pass = Bucket.acquireToken(this.RequestBucket);
-		this.saveState();
+		this.saveStateValue("requestBucket");
 
 		if (!pass) {
 			return new Response("Rate Limited", { status: 429 });
@@ -285,7 +312,7 @@ export class LobbyDO extends DurableObject<Env> {
 	async connectServer(request: Request, code: string): Promise<Response> {
 		// Rate limiter
 		const pass = Bucket.acquireToken(this.ConnectBucket);
-		this.saveState();
+		this.saveStateValue("connectBucket");
 
 		if (!pass) {
 			return new Response("Rate Limited", { status: 429 });
@@ -303,9 +330,10 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		// Save the code and peer index in state
-		this.state.code = code;
-		this.state.nextPeer = 0;
-		this.saveState();
+		this.setState({
+			code: code,
+			nextPeer: 0
+		});
 		const randomCode = createRandomKey(2);
 
 		// Insert the new lobby code into the database
@@ -333,7 +361,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		// Send the lobby code to the server
 		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
-			code: this.state.code,
+			code: code,
 			key: serverWSData.key,
 			reconnectKey: randomCode,
 			msg: "inf"
@@ -360,7 +388,7 @@ export class LobbyDO extends DurableObject<Env> {
 	async connectClient(request: Request): Promise<Response> {
 		// Rate limiter
 		const pass = Bucket.acquireToken(this.JoinBucket);
-		this.saveState();
+		this.saveStateValue("joinBucket");
 
 		if (!pass) {
 			return new Response("Rate Limited", { status: 429 });
@@ -431,7 +459,7 @@ export class LobbyDO extends DurableObject<Env> {
 	async reconnectServer(request: Request): Promise<Response> {
 		// Rate limiter
 		const pass = Bucket.acquireToken(this.ReconnectBucket);
-		this.saveState();
+		this.saveStateValue("reconnectBucket");
 
 		if (!pass) {
 			return new Response("Rate Limited", { status: 429 });
@@ -552,8 +580,9 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		// Clear the server message queue since all messages will be sent to the server on reconnect
-		this.state.serverMessageQueue = [];
-		this.saveState();
+		this.setState({
+			serverMessageQueue: []
+		});
 
 		// Send info to server
 		server.send(JSON.stringify([infoPacket, ...connectionPackets, ...queuedMessages]));
@@ -568,7 +597,7 @@ export class LobbyDO extends DurableObject<Env> {
 	/** Get the next available peer ID */
 	private getNextAvailablePeer(): number {
 		const peer = this.state.nextPeer++;
-		this.saveState();
+		this.saveStateValue("nextPeer");
 		return peer;
 	}
 
@@ -860,7 +889,7 @@ export class LobbyDO extends DurableObject<Env> {
 		// Queue message if the server is not connected
 		if (packedMessage === null) {
 			this.state.serverMessageQueue.push([pid, payload]);
-			this.saveState();
+			this.saveStateValue("serverMessageQueue");
 			return;
 		}
 
