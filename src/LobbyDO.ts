@@ -134,8 +134,8 @@ export class LobbyDO extends DurableObject<Env> {
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 
 		ctx.blockConcurrencyWhile((async () => {
-			await this.loadState.bind(this)();
-			await this.refreshSockets.bind(this)();
+			await this.loadState();
+			await this.refreshSockets();
 		}).bind(this));
 	}
 

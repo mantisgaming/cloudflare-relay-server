@@ -1,12 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import { Bucket } from "./Bucket";
 
-type BucketMap = Map<string, Bucket.BucketData>;
 type BucketParamMap = [string, Bucket.BucketParameters][];
 
 // Durable Object for generating unique lobby codes
 export class IPRateLimiterDO extends DurableObject<Env> {
-    private readonly bucketMap: BucketMap;
     private readonly bucketParamMap: BucketParamMap;
     private readonly defaultBucketParams: Bucket.BucketParameters = {
         capacity: 20,
@@ -18,7 +16,6 @@ export class IPRateLimiterDO extends DurableObject<Env> {
     // constructor
     constructor(ctx: DurableObjectState<{}>, env: Env) {
         super(ctx, env);
-        this.bucketMap = new Map();
         this.bucketParamMap = [
             ["any", {
                 capacity: env.RATE_LIMITER_IP_ANY_CAPACITY,
@@ -37,31 +34,64 @@ export class IPRateLimiterDO extends DurableObject<Env> {
                 fillRate: env.RATE_LIMITER_IP_JOIN_RATE
             }],
         ];
+
+        ctx.blockConcurrencyWhile(async () => {
+            this.lastClean = await ctx.storage.get<number>("lastClean") ?? Date.now();
+            await this.clean(true);
+        })
     }
 
     /** Acquire permission to make a request */
-    public acquireToken(IPAddress: string, requestType: string): boolean {
-        const bucket = this.getBucket([IPAddress, requestType]);
-        return Bucket.acquireToken(bucket);
+    public async acquireToken(IPAddress: string, requestType: string): Promise<boolean> {
+        const bucket = await this.getBucket([IPAddress, requestType]);
+        const result = Bucket.acquireToken(bucket);
+        await this.saveBucket([IPAddress, requestType], bucket.state);
+
+        await this.clean();
+
+        return result;
     }
 
-    private getBucket(key: [string, string]): Bucket.BucketData {
-        const mapKey = `${key[0]}:${key[1]}`;
+    private async getBucket(key: [string, string]): Promise<Bucket.BucketData> {
+        const bucketID = `${key[0]}:${key[1]}`;
 
-        // return an existing bucket
-        if (this.bucketMap.has(mapKey))
-            return this.bucketMap.get(mapKey)!;
+        // Check for an existing bucket
+        const result = await this.env.RELAY_D1.prepare(`
+            SELECT * FROM buckets WHERE bucketid = ?;    
+        `).bind(bucketID).first();
 
-        // initialize a new bucket
+        // Try to return the existing bucket
+        try {
+            if (result !== null) {
+                const state = JSON.parse(result.bucketstate as string);
+
+                return {
+                    params: this.getParamsForRequest(key[1]),
+                    state: state
+                };
+            }
+        } catch { }
+
+        // send a new bucket
         const params = this.getParamsForRequest(key[1]);
         const newBucket: Bucket.BucketData = {
             params,
             state: Bucket.createDefaultState(params)
         }
 
-        // insert and return the new bucket
-        this.bucketMap.set(mapKey, newBucket)
         return newBucket;
+    }
+
+    private async saveBucket(key: [string, string], state: Bucket.BucketState): Promise<void> {
+        const bucketID = `${key[0]}:${key[1]}`;
+
+        const result = await this.env.RELAY_D1.prepare(`
+            REPLACE INTO buckets (bucketid, bucketstate) VALUES (?, ?);
+        `).bind(bucketID, JSON.stringify(state)).run();
+
+        if (!result.success) {
+            console.log(result.error);
+        }
     }
 
     private getParamsForRequest(request: string): Bucket.BucketParameters {
@@ -76,34 +106,46 @@ export class IPRateLimiterDO extends DurableObject<Env> {
         return this.defaultBucketParams;
     }
 
-    public clean(): void {
+    public async clean(force: boolean = false): Promise<void> {
         const now = Date.now();
 
         // Wait at least 5 seconds between cleans
-        if (now - this.lastClean < 5000)
+        if (!force && now - this.lastClean < 5000)
             return;
 
         this.lastClean = now;
+        this.ctx.storage.put("lastClean", this.lastClean);
+
+        // Get all buckets
+        const request = await this.env.RELAY_D1.prepare(`
+            SELECT * FROM buckets;    
+        `).all();
+
+        if (!request.success) {
+            console.log(`D1 Error in clean: ${request.error}`);
+            return;
+        }
 
         // For each bucket
-        for (const [key, val] of this.bucketMap) {
-            const deltaTime = now - val.state.lastUpdate;
+        for (const entry of request.results) {
+            const bucketid = entry.bucketid as string;
+            const bucketstate = JSON.parse(entry.bucketstate as string) as Bucket.BucketState;
 
-            // If the bucket is not full
-            if (val.state.tokens != val.params.capacity) {
-                // Update it if it has been over a minute since the bucket was used
-                if (deltaTime > 1000 * 60) {
-                    Bucket.normalize(val, now);
-                }
-
-                continue;
+            const bucket: Bucket.BucketData = {
+                params: this.getParamsForRequest(bucketid.split(":")[1]),
+                state: bucketstate
             }
 
-            // If it has been over 5 minutes that the bucket has been filled, delete it
-            if (deltaTime > 1000 * 60 * 5 && val.state.tokens == val.params.capacity) {
-                this.bucketMap.delete(key);
+            const deltaTime = now - bucket.state.lastUpdate;
 
-                continue;
+            // If it has been over 5 minutes since a full bucket has been used, delete it
+            if (
+                deltaTime > 1000 * 60 * 5 &&
+                Bucket.getTokenCount(bucket) >= bucket.params.capacity
+            ) {
+                this.env.RELAY_D1.prepare(`
+                    DELETE FROM buckets WHERE bucketid = ?;
+                `).bind(bucketid).run();
             }
         }
     }

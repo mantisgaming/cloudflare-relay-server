@@ -37,12 +37,43 @@ export class GlobalRateLimiterDO extends DurableObject<Env> {
                 fillRate: env.RATE_LIMITER_GLOBAL_JOIN_RATE
             }],
         ];
+
+        // Load bucket state
+        ctx.blockConcurrencyWhile(async () => {
+            Object.assign(this.bucketMap,
+                new Map(
+                    (
+                        JSON.parse(
+                            await this.ctx.storage.get<string>("buckets") ?? "[]"
+                        ) as [string, Bucket.BucketState][]
+                    ).map(val => ([
+                        val[0], {
+                            state: val[1],
+                            params: this.getParamsForRequest(val[0])
+                        }
+                    ]))
+                )
+            );
+        })
     }
 
     /** Acquire permission to make a request */
     public acquireToken(requestType: string): boolean {
         const bucket = this.getBucket(requestType);
-        return Bucket.acquireToken(bucket);
+        const result = Bucket.acquireToken(bucket);
+
+        var entries: [string, Bucket.BucketState][] = [];
+
+        for (const bucket of this.bucketMap.entries()) {
+            entries.push([
+                bucket[0],
+                bucket[1].state
+            ]);
+        }
+
+        this.ctx.storage.put("buckets", JSON.stringify(entries));
+
+        return result;
     }
 
     private getBucket(key: string): Bucket.BucketData {

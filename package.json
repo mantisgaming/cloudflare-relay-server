@@ -9,7 +9,7 @@
 		"demo-site": "npx http-server ./demo-site -p 8080",
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types",
-		"reset-local-db": "wrangler d1 execute RELAY_D1 --local -e staging --file=./RELAY_D1_schema.sql"
+		"reset-local-db": "wrangler d1 execute RELAY_D1_DEV --local -e staging --file RELAY_D1_schema.sql"
 	},
 	"devDependencies": {
 		"typescript": "^5.5.2",

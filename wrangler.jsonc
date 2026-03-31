@@ -24,6 +24,18 @@
 				"IPRateLimiterDO",
 				"GlobalRateLimiterDO"
 			]
+		},
+		{
+			"tag": "v3",
+			"deleted_classes": [
+				"LobbyDO"
+			]
+		},
+		{
+			"tag": "v3",
+			"new_sqlite_classes": [
+				"LobbyDO"
+			]
 		}
 	],
 	"observability": {
