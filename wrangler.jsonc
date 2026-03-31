@@ -113,10 +113,6 @@
 			"durable_objects": {
 				"bindings": [
 					{
-						"class_name": "LobbyDO",
-						"name": "LOBBY_DO"
-					},
-					{
 						"class_name": "CodeGeneratorDO",
 						"name": "CODE_GENERATOR_DO"
 					},
@@ -181,10 +177,6 @@
 	},
 	"durable_objects": {
 		"bindings": [
-			{
-				"class_name": "LobbyDO",
-				"name": "LOBBY_DO"
-			},
 			{
 				"class_name": "CodeGeneratorDO",
 				"name": "CODE_GENERATOR_DO"
