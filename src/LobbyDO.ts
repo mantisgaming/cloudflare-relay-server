@@ -346,7 +346,8 @@ export class LobbyDO extends DurableObject<Env> {
 			});
 
 			for (const socket of this.ctx.getWebSockets()) {
-				socket.send("ping");
+				if (socket.readyState === WebSocket.OPEN)
+					socket.send("ping");
 			}
 		}
 	}
@@ -979,7 +980,8 @@ export class LobbyDO extends DurableObject<Env> {
 				pld: stringPayload
 			}
 
-			socket.send(JSON.stringify([message]));
+			if (socket.readyState === WebSocket.OPEN)
+				socket.send(JSON.stringify([message]));
 		}
 	}
 
