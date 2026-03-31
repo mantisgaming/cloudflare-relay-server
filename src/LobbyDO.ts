@@ -6,6 +6,7 @@ interface LobbyState {
 	code: string | null;
 	nextPeer: number;
 	lastCleanup: number;
+	lastPing: number;
 	requestBucket: Bucket.BucketState;
 	joinBucket: Bucket.BucketState;
 	connectBucket: Bucket.BucketState;
@@ -121,6 +122,7 @@ export class LobbyDO extends DurableObject<Env> {
 			code: null,
 			nextPeer: 0,
 			lastCleanup: Date.now(),
+			lastPing: Date.now(),
 			requestBucket: Bucket.createDefaultState(this.requestBucketParams),
 			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
 			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
@@ -184,7 +186,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 	/** Remove any websockets that have not responded recently */
 	private async cleanup(): Promise<void> {
-		if (Date.now() - this.state.lastCleanup < 1000 * 1)
+		if (Date.now() - this.state.lastCleanup < 1000 * this.env.CLEANUP_INTERVAL)
 			return;
 
 		this.setState({
@@ -211,9 +213,9 @@ export class LobbyDO extends DurableObject<Env> {
 
 			const now = Date.now();
 
-			if (now - lastActive > 1000 * 15) {
+			if (now - lastActive > 1000 * this.env.WEBSOCKET_TIMEOUT_DURATION) {
 				socket.close(1000, "Connection Timed Out");
-			} else if (now - lastMessage > 1000 * 60 * 30) {
+			} else if (now - lastMessage > 1000 * this.env.WEBSOCKET_IDLE_DURATION) {
 				socket.close(1000, "Connection Idle");
 			}
 		}
@@ -231,7 +233,7 @@ export class LobbyDO extends DurableObject<Env> {
 			// if it is the server, handle it
 			if (entry.data.isServer) {
 				this.server = null;
-				
+
 				// log disconnect
 				console.log(`Relay "${this.state.code}": Server websocket vanished`);
 				continue;
@@ -336,11 +338,17 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	async pingRoutine(): Promise<void> {
-		for (const socket of this.ctx.getWebSockets()) {
-			socket.send("ping");
-		}
+		await this.cleanup();
 
-		this.cleanup();
+		if (Date.now() - this.state.lastPing >= 1000 * this.env.PING_INTERVAL) {
+			this.setState({
+				lastPing: Date.now()
+			});
+
+			for (const socket of this.ctx.getWebSockets()) {
+				socket.send("ping");
+			}
+		}
 	}
 
 	// Handle incoming requests
@@ -698,7 +706,7 @@ export class LobbyDO extends DurableObject<Env> {
 		this.saveStateValue("websocketData");
 
 		// Run cleanup routine
-		this.cleanup();
+		await this.pingRoutine();
 
 		// Reject binary data
 		if (typeof message == "object") {
@@ -791,13 +799,13 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 	}
 
-	webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void {
+	async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
 		// Get the websocket data
 		const socketID = ws.deserializeAttachment() as string;
 		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 
 		// Run cleanup routine
-		this.cleanup();
+		await this.pingRoutine();
 
 		ws.close(code, reason);
 
@@ -811,13 +819,13 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 	}
 
-	webSocketError(ws: WebSocket, error: unknown): void {
+	async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
 		// Get the websocket data
 		const socketID = ws.deserializeAttachment() as string;
 		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 
 		// Run cleanup routine
-		this.cleanup();
+		await this.pingRoutine();
 
 		// Call corresponding event handler
 		if (wsData.isServer) {

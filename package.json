@@ -5,11 +5,11 @@
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"predev": "npm run reset-local-db",
-		"dev": "wrangler dev --test-scheduled -e=development --local",
+		"dev": "wrangler dev --test-scheduled -e=staging --local",
 		"demo-site": "npx http-server ./demo-site -p 8080",
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types",
-		"reset-local-db": "wrangler d1 execute RELAY_D1 --local -e development --file=./RELAY_D1_schema.sql"
+		"reset-local-db": "wrangler d1 execute RELAY_D1 --local -e staging --file=./RELAY_D1_schema.sql"
 	},
 	"devDependencies": {
 		"typescript": "^5.5.2",

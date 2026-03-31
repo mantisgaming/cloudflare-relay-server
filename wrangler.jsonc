@@ -67,6 +67,10 @@
 		"RATE_LIMITER_LOBBY_CONNECT_RATE": 12,
 		"RATE_LIMITER_LOBBY_RECONNECT_CAPACITY": 5,
 		"RATE_LIMITER_LOBBY_RECONNECT_RATE": 12,
+		"PING_INTERVAL": 1,
+		"CLEANUP_INTERVAL": 1,
+		"WEBSOCKET_TIMEOUT_DURATION": 15,
+		"WEBSOCKET_IDLE_DURATION": 900,
 	},
 	"triggers": {
 		"crons": [
@@ -79,96 +83,19 @@
 		"cwd": "./",
 		"watch_dir": "./src"
 	},
+	"routes": [
+		{
+			"pattern": "www.totsmgame.com/relay/*",
+			"zone_name": "totsmgame.com"
+		}
+	],
 	"minify": true,
 	"env": {
-		"production": {
-			"routes": [
-				{
-					"pattern": "totsmgame.com/relay/*",
-					"zone_name": "totsmgame.com"
-				},
-				{
-					"pattern": "www.totsmgame.com/relay/*",
-					"zone_name": "totsmgame.com"
-				},
-				{
-					"custom_domain": true,
-					"pattern": "relay.totsmgame.com",
-				}
-			],
-			"durable_objects": {
-				"bindings": [
-					{
-						"class_name": "LobbyDO",
-						"name": "LOBBY_DO"
-					},
-					{
-						"class_name": "CodeGeneratorDO",
-						"name": "CODE_GENERATOR_DO"
-					},
-					{
-						"class_name": "IPRateLimiterDO",
-						"name": "IP_RATE_LIMITER_DO"
-					},
-					{
-						"class_name": "GlobalRateLimiterDO",
-						"name": "GLOBAL_RATE_LIMITER_DO"
-					}
-				]
-			},
-			"vars": {
-				"CODE_LENGTH": 4,
-				"CODE_INCREMENTER": 318211,
-				"MAXIMUM_LOBBY_CONNECTIONS": 12,
-				"MAXIMUM_MESSAGE_SIZE": 4,
-				"BASE_ROUTE": "/relay",
-				"IP_RATE_LIMITER_SHARDS": 1,
-				"RATE_LIMITER_GLOBAL_ANY_CAPACITY": 200,
-				"RATE_LIMITER_GLOBAL_ANY_RATE": 1200,
-				"RATE_LIMITER_GLOBAL_CREATE_CAPACITY": 100,
-				"RATE_LIMITER_GLOBAL_CREATE_RATE": 300,
-				"RATE_LIMITER_GLOBAL_RECONNECT_CAPACITY": 100,
-				"RATE_LIMITER_GLOBAL_RECONNECT_RATE": 300,
-				"RATE_LIMITER_GLOBAL_JOIN_CAPACITY": 300,
-				"RATE_LIMITER_GLOBAL_JOIN_RATE": 600,
-				"RATE_LIMITER_IP_ANY_CAPACITY": 20,
-				"RATE_LIMITER_IP_ANY_RATE": 120,
-				"RATE_LIMITER_IP_CREATE_CAPACITY": 10,
-				"RATE_LIMITER_IP_CREATE_RATE": 30,
-				"RATE_LIMITER_IP_RECONNECT_CAPACITY": 10,
-				"RATE_LIMITER_IP_RECONNECT_RATE": 30,
-				"RATE_LIMITER_IP_JOIN_CAPACITY": 30,
-				"RATE_LIMITER_IP_JOIN_RATE": 60,
-				"RATE_LIMITER_CLIENT_MESSAGE_CAPACITY": 10,
-				"RATE_LIMITER_CLIENT_MESSAGE_RATE": 30,
-				"RATE_LIMITER_SERVER_MESSAGE_CAPACITY": 30,
-				"RATE_LIMITER_SERVER_MESSAGE_RATE": 60,
-				"RATE_LIMITER_LOBBY_REQUEST_CAPACITY": 20,
-				"RATE_LIMITER_LOBBY_REQUEST_RATE": 60,
-				"RATE_LIMITER_LOBBY_JOIN_CAPACITY": 20,
-				"RATE_LIMITER_LOBBY_JOIN_RATE": 30,
-				"RATE_LIMITER_LOBBY_CONNECT_CAPACITY": 5,
-				"RATE_LIMITER_LOBBY_CONNECT_RATE": 12,
-				"RATE_LIMITER_LOBBY_RECONNECT_CAPACITY": 5,
-				"RATE_LIMITER_LOBBY_RECONNECT_RATE": 12,
-			},
-			"d1_databases": [
-				{
-					"binding": "RELAY_D1",
-					"database_name": "RELAY_D1",
-					"database_id": "35906a97-3083-4893-b77d-a2a0bf521085"
-				}
-			]
-		},
-		"development": {
+		"staging": {
 			"routes": [
 				{
 					"pattern": "dev.totsmgame.com/relay/*",
 					"zone_name": "totsmgame.com"
-				},
-				{
-					"custom_domain": true,
-					"pattern": "relay-dev.totsmgame.com",
 				}
 			],
 			"durable_objects": {
@@ -226,6 +153,10 @@
 				"RATE_LIMITER_LOBBY_CONNECT_RATE": 12,
 				"RATE_LIMITER_LOBBY_RECONNECT_CAPACITY": 5,
 				"RATE_LIMITER_LOBBY_RECONNECT_RATE": 12,
+				"PING_INTERVAL": 1,
+				"CLEANUP_INTERVAL": 1,
+				"WEBSOCKET_TIMEOUT_DURATION": 15,
+				"WEBSOCKET_IDLE_DURATION": 900,
 			},
 			"d1_databases": [
 				{
@@ -262,5 +193,6 @@
 			"database_name": "RELAY_D1",
 			"database_id": "35906a97-3083-4893-b77d-a2a0bf521085"
 		}
-	]
+	],
+	"keep_vars": false
 }
