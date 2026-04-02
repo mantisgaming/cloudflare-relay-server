@@ -201,7 +201,8 @@ export class LobbyDO extends DurableObject<Env> {
 			activeSockets.add(socketID);
 
 			if (wsData === undefined) {
-				socket.close(1000, "Socket does not have metadata");
+				if (socket.readyState === WebSocket.OPEN)
+					socket.close(1000, "Socket does not have metadata");
 				continue;
 			}
 
@@ -221,14 +222,18 @@ export class LobbyDO extends DurableObject<Env> {
 		}
 
 		// Check if there are any missing websockets
-		for (const entry of this.state.websocketData) {
+		for (let i = 0; i < this.state.websocketData.length; i++) {
+			const entry = this.state.websocketData[i];
+
 			// Skip sockets that were found
 			if (activeSockets.has(entry.socketUID)) {
 				continue;
 			}
 
 			// remove the websocket data
-			this.state.websocketData.splice(this.state.websocketData.findIndex(e => e === entry), 1);
+			this.state.websocketData.splice(i, 1);
+			// decrement iterator to fix for loop ordering
+			i--;
 
 			// if it is the server, handle it
 			if (entry.data.isServer) {
@@ -236,6 +241,11 @@ export class LobbyDO extends DurableObject<Env> {
 
 				// log disconnect
 				console.log(`Relay "${this.state.code}": Server websocket vanished`);
+
+				// Update database to mark the lobby as disconnected
+				this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 0 WHERE code = ?").bind(this.state.code).run().catch((err) => {
+					console.error(`Relay "${this.state.code}": Error updating lobby state in database: ${err.message}`);
+				});
 				continue;
 			}
 
@@ -293,7 +303,7 @@ export class LobbyDO extends DurableObject<Env> {
 
 		for (const ws of this.ctx.getWebSockets()) {
 			const socketID = ws.deserializeAttachment() as string;
-			const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
+			const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)?.data;
 			if (wsData === undefined) {
 				ws.close(1008, "Missing WebSocket attachment");
 				return;
@@ -802,10 +812,9 @@ export class LobbyDO extends DurableObject<Env> {
 	async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
 		// Get the websocket data
 		const socketID = ws.deserializeAttachment() as string;
-		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
-
-		// Run cleanup routine
-		await this.pingRoutine();
+		const wsDataIndex = this.state.websocketData.findIndex(entry => entry.socketUID === socketID)!;
+		const wsData = this.state.websocketData[wsDataIndex].data;
+		this.state.websocketData.splice(wsDataIndex, 1);
 
 		ws.close(code, reason);
 
@@ -817,6 +826,9 @@ export class LobbyDO extends DurableObject<Env> {
 			console.log(`Relay "${this.state.code}": Client ${wsData.peerID} websocket closed${reason ? ": " + reason : ""}`);
 			this.onClientClose(wsData.peerID);
 		}
+
+		// Run cleanup routine
+		await this.pingRoutine();
 	}
 
 	async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
