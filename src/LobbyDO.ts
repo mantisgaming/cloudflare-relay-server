@@ -949,6 +949,8 @@ export class LobbyDO extends DurableObject<Env> {
 			pld: stringPayload
 		};
 
+		console.log(`Relay "${this.state.code}": Sending disconnect message for client ${pid} to server`);
+
 		// Send disconnect message
 		this.server.send(JSON.stringify([message]));
 	}
