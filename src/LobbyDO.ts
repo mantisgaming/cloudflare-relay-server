@@ -310,7 +310,6 @@ export class LobbyDO extends DurableObject<Env> {
 			}
 
 			if (wsData.isServer) {
-				console.log(`Relay "${this.state.code}": Server is socket ${socketID}`);
 				if (this.server != null) {
 					console.warn("Multiple websockets marked as server");
 					ws.close(1008, "Socket appears to be duplicate server");
@@ -318,7 +317,6 @@ export class LobbyDO extends DurableObject<Env> {
 					this.server = ws;
 				}
 			} else {
-				console.log(`Relay "${this.state.code}": Peer ${wsData.peerID} is socket ${socketID}`);
 				this.peers.set(wsData.peerID, ws);
 			}
 		}
@@ -952,8 +950,6 @@ export class LobbyDO extends DurableObject<Env> {
 			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key),
 			pld: stringPayload
 		};
-
-		console.log(`Relay "${this.state.code}": Sending disconnect message for client ${pid} to server (${this.server.deserializeAttachment()})`);
 
 		// Send disconnect message
 		this.server.send(JSON.stringify([message]));
