@@ -306,10 +306,11 @@ export class LobbyDO extends DurableObject<Env> {
 			const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)?.data;
 			if (wsData === undefined) {
 				ws.close(1008, "Missing WebSocket attachment");
-				return;
+				continue;
 			}
 
 			if (wsData.isServer) {
+				console.log(`Relay "${this.state.code}": Server is socket ${socketID}`);
 				if (this.server != null) {
 					console.warn("Multiple websockets marked as server");
 					ws.close(1008, "Socket appears to be duplicate server");
@@ -317,12 +318,15 @@ export class LobbyDO extends DurableObject<Env> {
 					this.server = ws;
 				}
 			} else {
+				console.log(`Relay "${this.state.code}": Peer ${wsData.peerID} is socket ${socketID}`);
 				this.peers.set(wsData.peerID, ws);
 			}
 		}
 
-		if (this.state.code === null)
+		if (this.state.code === null) {
+
 			return;
+		}
 
 		const connectedInt = this.server === null ? 0 : 1;
 
@@ -949,7 +953,7 @@ export class LobbyDO extends DurableObject<Env> {
 			pld: stringPayload
 		};
 
-		console.log(`Relay "${this.state.code}": Sending disconnect message for client ${pid} to server`);
+		console.log(`Relay "${this.state.code}": Sending disconnect message for client ${pid} to server (${this.server.deserializeAttachment()})`);
 
 		// Send disconnect message
 		this.server.send(JSON.stringify([message]));
