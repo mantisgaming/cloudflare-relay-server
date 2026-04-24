@@ -819,7 +819,8 @@ export class LobbyDO extends DurableObject<Env> {
 		const wsData = this.state.websocketData[wsDataIndex].data;
 		this.state.websocketData.splice(wsDataIndex, 1);
 
-		ws.close(code, reason);
+		if (wasClean)
+			ws.close(code, reason);
 
 		// Call corresponding event handler
 		if (wsData.isServer) {
