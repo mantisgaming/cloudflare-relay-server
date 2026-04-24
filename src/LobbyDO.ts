@@ -1,118 +1,379 @@
 import { DurableObject } from "cloudflare:workers";
-import { RelayMessage } from "./RelayMessage";
+import { createMessageDigest, createRandomKey, OmitUndefined, RelayMessage, RelayMessagePayload, verifyMessageDigest } from "./RelayMessage";
+import { Bucket } from "./Bucket";
+
+interface LobbyState {
+	code: string | null;
+	nextPeer: number;
+	lastCleanup: number;
+	lastPing: number;
+	requestBucket: Bucket.BucketState;
+	joinBucket: Bucket.BucketState;
+	connectBucket: Bucket.BucketState;
+	reconnectBucket: Bucket.BucketState;
+	serverMessageQueue: {
+		pid: number,
+		payload: OmitUndefined<RelayMessagePayload.Data<"client-to-relay">>
+	}[];
+	websocketData: {
+		socketUID: string,
+		data: WebsocketMetadata
+	}[];
+}
+
+type WebsocketMetadata = {
+	/** HMAC Key for this websocket */
+	key: string;
+	/** The last time a valid message was received */
+	lastMessageTime: number;
+	/** The last time any message or ping was received */
+	lastActiveTime: number;
+	/** Whether or not the websocket is a server host */
+	isServer: boolean;
+	/** Message rate limiter bucket */
+	bucket: Bucket.BucketState
+} & (
+		{
+			isServer: true;
+		} | {
+			isServer: false,
+			/** Peer ID number for this websocket */
+			peerID: number
+		}
+	);
 
 // Durable Object for relaying a WebSocket lobby between a server and multiple clients
 export class LobbyDO extends DurableObject<Env> {
-	// Lobby state
-	private code: string | null = null;
-	private server: string | null = null;
-	private peers: Map<number, string> = new Map<number, string>();
-	private nextPeer: number = 0;
-	private currentPeers: number = 0;
-	private lastUsedTime: Map<string, number> = new Map<string, number>();
+	private readonly state: LobbyState;
 
-	private websocketMap: Map<string, WebSocket> = new Map<string, WebSocket>();
+	private server: WebSocket | null = null;
+	private peers: Map<number, WebSocket> = new Map();
+
+	private readonly serverBucketParams: Bucket.BucketParameters;
+	private readonly peerBucketParams: Bucket.BucketParameters;
+	private readonly requestBucketParams: Bucket.BucketParameters;
+	private readonly joinBucketParams: Bucket.BucketParameters;
+	private readonly connectBucketParams: Bucket.BucketParameters;
+	private readonly reconnectBucketParams: Bucket.BucketParameters;
+
+	private get RequestBucket(): Bucket.BucketData {
+		return {
+			params: this.requestBucketParams,
+			state: this.state.requestBucket
+		};
+	}
+
+	private get JoinBucket(): Bucket.BucketData {
+		return {
+			params: this.joinBucketParams,
+			state: this.state.joinBucket
+		};
+	}
+
+	private get ConnectBucket(): Bucket.BucketData {
+		return {
+			params: this.connectBucketParams,
+			state: this.state.connectBucket
+		};
+	}
+
+	private get ReconnectBucket(): Bucket.BucketData {
+		return {
+			params: this.reconnectBucketParams,
+			state: this.state.reconnectBucket
+		};
+	}
 
 	// Constructor
 	constructor(ctx: DurableObjectState<{}>, env: Env) {
 		super(ctx, env);
-		this.loadState();
 
-		ctx.getWebSockets().forEach((ws) => {
-			const id = ws.deserializeAttachment() as string | undefined;
-			if (id === undefined) {
-				ws.close(1008, "Missing WebSocket attachment");
-				return;
-			}
-			this.websocketMap.set(id, ws);
-		});
+		this.serverBucketParams = {
+			capacity: env.RATE_LIMITER_SERVER_MESSAGE_CAPACITY,
+			fillRate: env.RATE_LIMITER_SERVER_MESSAGE_RATE
+		}
+
+		this.peerBucketParams = {
+			capacity: env.RATE_LIMITER_CLIENT_MESSAGE_CAPACITY,
+			fillRate: env.RATE_LIMITER_CLIENT_MESSAGE_RATE
+		}
+
+		this.requestBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_REQUEST_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_REQUEST_RATE
+		}
+
+		this.joinBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_JOIN_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_JOIN_RATE
+		}
+
+		this.connectBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_CONNECT_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_CONNECT_RATE
+		}
+
+		this.reconnectBucketParams = {
+			capacity: env.RATE_LIMITER_LOBBY_RECONNECT_CAPACITY,
+			fillRate: env.RATE_LIMITER_LOBBY_RECONNECT_RATE
+		}
+
+		this.state = {
+			code: null,
+			nextPeer: 0,
+			lastCleanup: Date.now(),
+			lastPing: Date.now(),
+			requestBucket: Bucket.createDefaultState(this.requestBucketParams),
+			connectBucket: Bucket.createDefaultState(this.connectBucketParams),
+			joinBucket: Bucket.createDefaultState(this.joinBucketParams),
+			reconnectBucket: Bucket.createDefaultState(this.reconnectBucketParams),
+			serverMessageQueue: [],
+			websocketData: []
+		}
+
+		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+
+		ctx.blockConcurrencyWhile((async () => {
+			await this.loadState();
+			await this.refreshSockets();
+		}).bind(this));
 	}
 
-	// Persist the current state to storage
-	private async saveState(): Promise<void> {
-		await this.ctx.blockConcurrencyWhile(async () => {
-			await this.ctx.storage.put("code", this.code);
-			await this.ctx.storage.put("server", this.server);
-			await this.ctx.storage.put("peers", JSON.stringify(Array.from(this.peers.entries())));
-			await this.ctx.storage.put("nextPeer", this.nextPeer.toString());
-			await this.ctx.storage.put("currentPeers", this.currentPeers.toString());
-			await this.ctx.storage.put("lastUsedTimes", JSON.stringify(Array.from(this.lastUsedTime.entries())));
-		});
+	private setState(state: Partial<LobbyState>): void {
+		Object.assign(this.state, state);
+
+		this.ctx.storage.put(
+			Object.fromEntries(
+				Object.entries(state).map(
+					val => [
+						val[0],
+						JSON.stringify(val[1])
+					]
+				)
+			)
+		);
 	}
 
+	private saveStateValue<T extends keyof LobbyState>(...keys: T[]): void {
+		this.ctx.storage.put(
+			Object.fromEntries(
+				Object.entries(this.state).filter(
+					val => keys.find(
+						key => key === val[0]
+					) !== undefined
+				).map(
+					val => [
+						val[0],
+						JSON.stringify(val[1])
+					]
+				)
+			)
+		);
+	}
+
+	/** Load the state of the durable object */
 	private async loadState(): Promise<void> {
-		await this.ctx.blockConcurrencyWhile(async () => {
-			this.code = await this.ctx.storage.get("code") ?? this.code;
-			this.server = await this.ctx.storage.get("server") ?? this.server;
-			const peersData = await this.ctx.storage.get("peers");
-			if (peersData !== undefined) {
-				this.peers = new Map<number, string>(JSON.parse(peersData as string));
-			}
-			const nextPeerData = await this.ctx.storage.get("nextPeer");
-			if (nextPeerData !== undefined) {
-				this.nextPeer = parseInt(nextPeerData as string);
-			}
-			const currentPeersData = await this.ctx.storage.get("currentPeers");
-			if (currentPeersData !== undefined) {
-				this.currentPeers = parseInt(currentPeersData as string);
-			}
-			const lastUsedTimeData = await this.ctx.storage.get("lastUsedTimes");
-			if (peersData !== undefined) {
-				this.lastUsedTime = new Map<string, number>(JSON.parse(peersData as string));
-			}
+		const loadedState = await this.ctx.storage.get(Object.keys(this.state));
+		const entries: [string, any][] = []
+		for (const entry of loadedState.entries()) {
+			entries.push([
+				entry[0],
+				JSON.parse(entry[1] as string)
+			])
+		}
+		Object.assign(this.state, Object.fromEntries(entries));
+	}
+
+	/** Remove any websockets that have not responded recently */
+	private async cleanup(): Promise<void> {
+		if (Date.now() - this.state.lastCleanup < 1000 * this.env.CLEANUP_INTERVAL)
+			return;
+
+		this.setState({
+			lastCleanup: Date.now()
 		});
-	}
 
-	private saveWebSocket(ws: WebSocket): string {
-		const wsId = crypto.randomUUID();
-		this.websocketMap.set(wsId, ws);
-		ws.serializeAttachment(wsId);
-		this.lastUsedTime.set(wsId, Date.now());
-		return wsId;
-	}
+		var activeSockets: Set<string> = new Set();
 
-	private getWebSocket(id: string | null): WebSocket | null {
-		if (id === null) {
-			return null;
-		}
-		return this.websocketMap.get(id) ?? null;
-	}
+		for (const socket of this.ctx.getWebSockets()) {
+			const socketID = socket.deserializeAttachment() as string;
+			const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)?.data;
+			activeSockets.add(socketID);
 
-	private getPeerWebSocket(id: number): WebSocket | null {
-		const wsId = this.peers.get(id) ?? null;
-		return this.getWebSocket(wsId);
-	}
+			if (wsData === undefined) {
+				if (socket.readyState === WebSocket.OPEN)
+					socket.close(1000, "Socket does not have metadata");
+				continue;
+			}
 
-	private getPeerFromWebSocket(wsID: string): number | null {
-		for (const [id, storedWsID] of this.peers.entries()) {
-			if (storedWsID === wsID) {
-				return id;
+			const lastMessage = wsData.lastMessageTime;
+			const lastActive = Math.max(
+				wsData.lastActiveTime,
+				this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0
+			);
+
+			const now = Date.now();
+
+			if (now - lastActive > 1000 * this.env.WEBSOCKET_TIMEOUT_DURATION) {
+				socket.close(1000, "Connection Timed Out");
+			} else if (now - lastMessage > 1000 * this.env.WEBSOCKET_IDLE_DURATION) {
+				socket.close(1000, "Connection Idle");
 			}
 		}
-		return null;
+
+		// Check if there are any missing websockets
+		for (let i = 0; i < this.state.websocketData.length; i++) {
+			const entry = this.state.websocketData[i];
+
+			// Skip sockets that were found
+			if (activeSockets.has(entry.socketUID)) {
+				continue;
+			}
+
+			// remove the websocket data
+			this.state.websocketData.splice(i, 1);
+			// decrement iterator to fix for loop ordering
+			i--;
+
+			// if it is the server, handle it
+			if (entry.data.isServer) {
+				this.server = null;
+
+				// log disconnect
+				console.log(`Relay "${this.state.code}": Server websocket vanished`);
+
+				// Update database to mark the lobby as disconnected
+				this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 0 WHERE code = ?").bind(this.state.code).run().catch((err) => {
+					console.error(`Relay "${this.state.code}": Error updating lobby state in database: ${err.message}`);
+				});
+				continue;
+			}
+
+			// log disconnect
+			console.log(`Relay "${this.state.code}": Client "${entry.data.peerID}" websocket vanished`);
+
+			// If there is no server, nothing left to do
+			if (this.server === null) {
+				continue;
+			}
+
+			// Tell the server the client is disconnected
+			const serverSocketID = this.server.deserializeAttachment() as string;
+			const serverData = this.state.websocketData.find(entry => entry.socketUID === serverSocketID)!.data;
+
+			// Create disconnect payload
+			const payload: RelayMessagePayload.Disconnect<"relay-to-server"> = {
+				msg: "dsc",
+				pid: entry.data.peerID
+			};
+
+			const stringPayload = JSON.stringify(payload);
+
+			// Create disconnect message
+			const message: RelayMessage = {
+				dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key),
+				pld: stringPayload
+			};
+
+			// Send disconnect message
+			this.server.send(JSON.stringify([message]));
+		}
+
+		this.saveStateValue("websocketData");
+
+		// Update the in-memory socket maps
+		await this.refreshSockets();
+
+		// If the lobby has been removed from the database, it should be reset
+		const existingLobby = await this.env.RELAY_D1.prepare(
+			"SELECT * FROM lobbies WHERE code = ?"
+		).bind(this.state.code).first();
+
+		if (!existingLobby) {
+			this.reset();
+		}
 	}
 
-	private isSocketServer(wsID: string): boolean {
-		return this.server === wsID;
-	}
+	/**
+	 * Reloads the in-memory websocket mapping
+	 */
+	private async refreshSockets(): Promise<void> {
+		this.server = null;
+		this.peers = new Map();
 
-	private cleanup(): void {
-		this.websocketMap.forEach((socket, key) => {
-			const wsID = socket.deserializeAttachment() as string;
-			const lastAutoResponse = this.lastUsedTime.get(wsID)!;
+		for (const ws of this.ctx.getWebSockets()) {
+			const socketID = ws.deserializeAttachment() as string;
+			const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)?.data;
+			if (wsData === undefined) {
+				ws.close(1008, "Missing WebSocket attachment");
+				continue;
+			}
 
-			if (Date.now() - lastAutoResponse > 5000) {
-				if (this.isSocketServer(key)) {
-					this.onServerClose(new CloseEvent("Server timed out"));
+			if (wsData.isServer) {
+				if (this.server != null) {
+					console.warn("Multiple websockets marked as server");
+					ws.close(1008, "Socket appears to be duplicate server");
 				} else {
-					this.onClientClose(this.getPeerFromWebSocket(key)!, new CloseEvent("Client timed out"));
+					this.server = ws;
 				}
+			} else {
+				this.peers.set(wsData.peerID, ws);
 			}
-		});
+		}
+
+		if (this.state.code === null) {
+
+			return;
+		}
+
+		const connectedInt = this.server === null ? 0 : 1;
+
+		// Update database with lobby connection state
+		const result = await this.env.RELAY_D1.prepare(`
+			UPDATE lobbies
+			SET connected = ?
+			WHERE code = ? AND connected != ?
+		`).bind(connectedInt, this.state.code, connectedInt).run();
+
+		if (!result.success) {
+			console.error("Database Error (updating lobby connection state):", result.error);
+		}
+	}
+
+	/** Reset the durable object */
+	reset(): void {
+		this.ctx.storage.deleteAll();
+
+		for (const socket of this.ctx.getWebSockets()) {
+			socket.close(1012, "Lobby Reset");
+		}
+	}
+
+	async pingRoutine(): Promise<void> {
+		await this.cleanup();
+
+		if (Date.now() - this.state.lastPing >= 1000 * this.env.PING_INTERVAL) {
+			this.setState({
+				lastPing: Date.now()
+			});
+
+			for (const socket of this.ctx.getWebSockets()) {
+				if (socket.readyState === WebSocket.OPEN)
+					socket.send("ping");
+			}
+		}
 	}
 
 	// Handle incoming requests
 	async fetch(request: Request): Promise<Response> {
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.RequestBucket);
+		this.saveStateValue("requestBucket");
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
+
 		// Determine the method from headers
 		const method = request.headers.get("Method");
 		if (method === "create") {
@@ -126,6 +387,9 @@ export class LobbyDO extends DurableObject<Env> {
 		} else if (method === "join") {
 			// Connect the client
 			return await this.connectClient(request);
+		} else if (method === "reconnect") {
+			// Reconnect a client
+			return await this.reconnectServer(request);
 		}
 
 		// Unknown method
@@ -133,6 +397,14 @@ export class LobbyDO extends DurableObject<Env> {
 	}
 
 	async connectServer(request: Request, code: string): Promise<Response> {
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.ConnectBucket);
+		this.saveStateValue("connectBucket");
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
+
 		// Require that the request is a WebSocket upgrade
 		const upgradeHeader = request.headers.get('Upgrade');
 		if (!upgradeHeader || upgradeHeader !== "websocket") {
@@ -144,29 +416,78 @@ export class LobbyDO extends DurableObject<Env> {
 			return new Response("A server is already connected to this lobby", { status: 403 });
 		}
 
+		// Save the code and peer index in state
+		this.setState({
+			code: code,
+			nextPeer: 0
+		});
+		const randomCode = createRandomKey(2);
+
+		// Insert the new lobby code into the database
+		const insertResult = await this.env.RELAY_D1.prepare("INSERT INTO lobbies (code, reconnect_code) VALUES (?, ?)").bind(this.state.code, randomCode).run();
+		if (!insertResult.success) {
+			return new Response("Database Error (creating lobby)", { status: 500 });
+		}
+
 		// Create a WebSocket pair
-		this.code = code;
 		const { 0: client, 1: server } = new WebSocketPair();
 
 		// Accept the server WebSocket
 		this.ctx.acceptWebSocket(server);
-		this.server = this.saveWebSocket(server);
-		console.log(`Relay "${this.code}": Server connected to lobby`);
+		this.server = server;
+
+		// Save data to websocket
+		const serverWSData: WebsocketMetadata = {
+			isServer: true,
+			key: createRandomKey(32),
+			lastActiveTime: Date.now(),
+			lastMessageTime: Date.now(),
+			bucket: Bucket.createDefaultState(this.serverBucketParams)
+		};
+
+		const newServerSocketID = crypto.randomUUID();
+		server.serializeAttachment(newServerSocketID);
+		this.state.websocketData.push({
+			socketUID: newServerSocketID,
+			data: serverWSData
+		});
+		this.saveStateValue("websocketData");
 
 		// Send the lobby code to the server
-		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
-			type: RelayMessage.Type.CODE,
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			code: this.code
-		}));
+		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
+			code: code,
+			key: serverWSData.key,
+			reconnectKey: randomCode,
+			msg: "inf"
+		};
 
-		this.saveState();
+		const stringPayload = JSON.stringify(infoPayload);
+
+		// Create packet
+		const infoPacket: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			pld: stringPayload
+		};
+
+		// Send info to server
+		server.send(JSON.stringify([infoPacket]));
+
+		// Log success
+		console.log(`Relay "${this.state.code}": Server connected to lobby`);
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	async connectClient(request: Request): Promise<Response> {
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.JoinBucket);
+		this.saveStateValue("joinBucket");
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
+
 		// Check if a server is connected
 		if (this.server === null) {
 			return new Response("No server connected to this lobby", { status: 404 });
@@ -178,298 +499,546 @@ export class LobbyDO extends DurableObject<Env> {
 			return new Response("Expected WebSocket", { status: 426 });
 		}
 
+		// Limit the number of peer connections
+		if (this.peers.size >= this.env.MAXIMUM_LOBBY_CONNECTIONS) {
+			return new Response("Lobby is full", { status: 423 })
+		}
+
 		// Get the next available peer ID
 		const id = this.getNextAvailablePeer();
-
-		// No available slots
-		if (id == -1) {
-			return new Response("No available peer slots", { status: 403 });
-		}
 
 		// Create a WebSocket pair
 		const { 0: client, 1: server } = new WebSocketPair();
 
 		// Accept the client WebSocket
 		this.ctx.acceptWebSocket(server);
-		this.peers.set(id, this.saveWebSocket(server));
-		this.currentPeers |= 1 << id;
-		console.log(`Relay "${this.code}": Client "${id}" connected to lobby`);
+		this.peers.set(id, server);
+
+		// Save data to websocket
+		const peerWSData: WebsocketMetadata = {
+			isServer: false,
+			peerID: id,
+			key: createRandomKey(32),
+			lastActiveTime: Date.now(),
+			lastMessageTime: Date.now(),
+			bucket: Bucket.createDefaultState(this.peerBucketParams)
+		};
+
+		const newSocketID = crypto.randomUUID();
+		server.serializeAttachment(newSocketID);
+		this.state.websocketData.push({
+			socketUID: newSocketID,
+			data: peerWSData
+		});
+		this.saveStateValue("websocketData");
+
+		console.log(`Relay "${this.state.code}": Client "${id}" connected to lobby`);
+
+		const serverID = this.server.deserializeAttachment() as string;
+		const serverWSData = this.state.websocketData.find(entry => entry.socketUID === serverID)!.data;
 
 		// Inform the server of the new connection
-		this.getWebSocket(this.server)?.send(RelayMessage.serialize({
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			type: RelayMessage.Type.CONNECT,
-			id: id
-		}));
+		const connectPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
+			msg: "con",
+			pid: id
+		};
 
-		this.saveState();
+		const stringPayload = JSON.stringify(connectPayload);
+
+		// Create packet
+		const connectPacket: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			pld: stringPayload
+		};
+
+		// Send info to server
+		this.server.send(JSON.stringify([connectPacket]));
 
 		// Return the client WebSocket
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
-	// Find the next available peer ID (0-31)
+	async reconnectServer(request: Request): Promise<Response> {
+		// Rate limiter
+		const pass = Bucket.acquireToken(this.ReconnectBucket);
+		this.saveStateValue("reconnectBucket");
+
+		if (!pass) {
+			return new Response("Rate Limited", { status: 429 });
+		}
+
+		// Get headers
+		const upgradeHeader = request.headers.get('Upgrade');
+		const reconnectCode = request.headers.get('Reconnect-Code');
+		const code = request.headers.get("Lobby-Code");
+
+		// Require that the request is a WebSocket upgrade
+		if (!upgradeHeader || upgradeHeader !== "websocket") {
+			return new Response("Expected WebSocket", { status: 426 });
+		}
+
+		// Make sure a code was sent
+		if (code === null) {
+			return new Response("Code not provided", { status: 400 });
+		}
+
+		// Make sure a reconnect code was sent
+		if (reconnectCode === null) {
+			return new Response("Reconnect code not provided", { status: 400 });
+		}
+
+		// Check if a server is already connected
+		if (this.server !== null) {
+			return new Response("A server is already connected to this lobby", { status: 403 });
+		}
+
+		// Check database for existing lobby
+		const existingLobby = await this.env.RELAY_D1.prepare(`
+			SELECT * FROM lobbies
+			WHERE code = ? AND reconnect_code = ?
+		`).bind(code, reconnectCode).first();
+
+		if (!existingLobby) {
+			return new Response(`Lobby "${code}" not found or invalid code provided`, { status: 404 });
+		}
+
+		if (this.state.code === null) {
+			this.state.code = code;
+		} else if (this.state.code != code) {
+			console.warn(`Lobby tried to reconnect to ${code} but lobby already belongs to ${this.state.code}`);
+			return new Response(`Lobby belongs to different code`, { status: 500 });
+		}
+
+		const randomCode = createRandomKey(2);
+
+		// Update database to mark the lobby as connected
+		const updateResult = await this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 1, reconnect_code = ? WHERE code = ?").bind(randomCode, this.state.code).run();
+		if (updateResult.error) {
+			return new Response("Database Error", { status: 500 });
+		}
+
+		// Create a WebSocket pair
+		const { 0: client, 1: server } = new WebSocketPair();
+
+		// Accept the server WebSocket
+		this.ctx.acceptWebSocket(server);
+		this.server = server;
+
+		// Save data to websocket
+		const serverWSData: WebsocketMetadata = {
+			isServer: true,
+			key: createRandomKey(32),
+			lastActiveTime: Date.now(),
+			lastMessageTime: Date.now(),
+			bucket: Bucket.createDefaultState(this.serverBucketParams)
+		};
+
+		const newServerSocketID = crypto.randomUUID();
+		server.serializeAttachment(newServerSocketID);
+		this.state.websocketData.push({
+			socketUID: newServerSocketID,
+			data: serverWSData
+		});
+		this.saveStateValue("websocketData");
+
+		// Send the lobby code to the server
+		const infoPayload: RelayMessagePayload.Info<"relay-to-server"> = {
+			code: this.state.code,
+			key: serverWSData.key,
+			reconnectKey: randomCode,
+			msg: "inf"
+		};
+
+		const stringPayload = JSON.stringify(infoPayload);
+
+		// Create Packet
+		const infoPacket: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+			pld: stringPayload
+		};
+
+		const connectionPackets: RelayMessage[] = [];
+
+		for (const [pid] of this.peers.entries()) {
+			// Inform the server of the new connection
+			const connectPayload: RelayMessagePayload.Connect<"relay-to-server"> = {
+				msg: "con",
+				pid: pid
+			};
+
+			const stringPayload = JSON.stringify(connectPayload);
+
+			// Create packet
+			const connectPacket: RelayMessage = {
+				dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverWSData.key),
+				pld: stringPayload
+			};
+
+			// Add to list of packets
+			connectionPackets.push(connectPacket);
+		}
+
+		const queuedMessages: RelayMessage[] = [];
+
+		// Add any queued messages to the list of packets to send
+		for (const { pid, payload } of this.state.serverMessageQueue) {
+			const packedMessage = await this.packDataPayload(pid, payload);
+			if (packedMessage !== null) {
+				queuedMessages.push(packedMessage);
+			}
+		}
+
+		// Clear the server message queue since all messages will be sent to the server on reconnect
+		this.setState({
+			serverMessageQueue: []
+		});
+
+		// Send info to server
+		server.send(JSON.stringify([infoPacket, ...connectionPackets, ...queuedMessages]));
+
+		// Log success
+		console.log(`Relay "${this.state.code}": Server connected to lobby`);
+
+		// Return the client WebSocket
+		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	/** Get the next available peer ID */
 	private getNextAvailablePeer(): number {
-		for (let i = 0; i < 32; i++) {
-			let id = (this.nextPeer + i) % 32;
-			if ((this.currentPeers >>> id & 0x1) === 0) {
-				this.nextPeer = (id + 1) % 32;
-				return id;
-			}
+		const peer = this.state.nextPeer++;
+		this.saveStateValue("nextPeer");
+		return peer;
+	}
+
+	/** Any websocket message will call this function */
+	async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+		// Get the websocket data and update its last active time
+		const socketID = ws.deserializeAttachment() as string;
+		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
+		wsData.lastActiveTime = Date.now();
+		this.saveStateValue("websocketData");
+
+		// Run cleanup routine
+		await this.pingRoutine();
+
+		// Reject binary data
+		if (typeof message == "object") {
+			ws.close(1007, "Received Binary Data");
+			return;
 		}
 
-		return -1;
-	}
+		// Reject messages that are too big
+		if (new TextEncoder().encode(message).length >= this.env.MAXIMUM_MESSAGE_SIZE * 1024) {
+			ws.close(1009, `Message Over ${this.env.MAXIMUM_MESSAGE_SIZE}KB`);
+			return;
+		}
 
-	// Check if a server is connected
-	hasConnectedServer(): boolean {
-		return this.server !== null && this.getWebSocket(this.server) !== null;
-	}
+		// Respond to ping message
+		if (message === "ping") {
+			ws.send("pong");
+			return;
+		}
 
-	webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
-		const wsID = ws.deserializeAttachment() as string;
-		this.lastUsedTime.set(wsID, Date.now());
+		// Ignore pong message
+		if (message === "pong") {
+			return;
+		}
 
-		this.cleanup();
-		if (this.isSocketServer(wsID)) {
-			this.onServerMessage(new MessageEvent("message", { data: message }));
-		} else {
-			const peerID = this.getPeerFromWebSocket(wsID);
-			if (peerID !== null) {
-				this.onClientMessage(peerID, new MessageEvent("message", { data: message }));
+		wsData.lastMessageTime = Date.now();
+
+		// Check rate limiter
+		const pass = Bucket.acquireToken(
+			{
+				state: wsData.bucket,
+				params: wsData.isServer ?
+					this.serverBucketParams :
+					this.peerBucketParams
+			},
+			wsData.lastActiveTime
+		);
+
+		// Save rate limiter state
+		this.saveStateValue("websocketData");
+
+		// If rate limiter fails send failure response
+		if (!pass) {
+			console.warn(`Relay "${this.state.code}": Rate limit exceeded for websocket`);
+			ws.send("rate_limited");
+			return;
+		}
+
+		// Parse data
+		var data: any;
+
+		try {
+			data = JSON.parse(message) as any;
+		} catch (e) {
+			ws.close(1007, "Malformed JSON");
+			return;
+		}
+
+		// Validate that the message is an array of packets
+		if (!Array.isArray(data)) {
+			ws.close(1007, "Expected message to be an array of packets");
+			return;
+		}
+
+		// Ignore empty messages
+		if (data.length === 0) {
+			return;
+		}
+
+		const messageDataArray = data as any[];
+
+		for (const messageData of messageDataArray) {
+			// Validate message format
+			if (messageData.pld === undefined || messageData.dgs === undefined) {
+				ws.close(1007, "Malformed message packet");
+				return;
+			}
+
+			// Check hmac
+			if (!await verifyMessageDigest(messageData, this.env.HMAC_APPLICATION_SECRET, wsData.key)) {
+				ws.close(1007, "HMAC Digest Did Not Match");
+				return;
+			}
+
+			// Call corresponding event handler
+			if (wsData.isServer) {
+				await this.onServerMessage(messageData);
 			} else {
-				console.warn(`Relay "${this.code}": Received message from unknown WebSocket`);
-				console.log(`Known websockets: ${JSON.stringify(this.websocketMap)}`)
-				ws.close();
+				await this.onClientMessage(wsData.peerID, messageData);
 			}
 		}
 	}
 
-	webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void {
-		const wsID = ws.deserializeAttachment() as string;
-		this.lastUsedTime.delete(wsID);
+	async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+		// Get the websocket data
+		const socketID = ws.deserializeAttachment() as string;
+		const wsDataIndex = this.state.websocketData.findIndex(entry => entry.socketUID === socketID)!;
+		const wsData = this.state.websocketData[wsDataIndex].data;
+		this.state.websocketData.splice(wsDataIndex, 1);
 
-		this.cleanup();
-		if (this.isSocketServer(wsID)) {
-			this.onServerClose(new CloseEvent("close", { code, reason, wasClean }));
+		ws.close(code, reason);
+
+		// Call corresponding event handler
+		if (wsData.isServer) {
+			console.log(`Relay "${this.state.code}": Server websocket closed${reason ? ": " + reason : ""}`);
+			this.onServerClose();
 		} else {
-			const peerID = this.getPeerFromWebSocket(wsID);
-			if (peerID !== null) {
-				this.onClientClose(peerID, new CloseEvent("close", { code, reason, wasClean }));
-			} else {
-				if (this.hasConnectedServer()) {
-					console.warn(`Relay "${this.code}": Received close event from unknown WebSocket`);
+			console.log(`Relay "${this.state.code}": Client ${wsData.peerID} websocket closed${reason ? ": " + reason : ""}`);
+			this.onClientClose(wsData.peerID);
+		}
+
+		// Run cleanup routine
+		await this.pingRoutine();
+	}
+
+	async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+		// Get the websocket data
+		const socketID = ws.deserializeAttachment() as string;
+		const wsData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
+
+		// Run cleanup routine
+		await this.pingRoutine();
+
+		// Call corresponding event handler
+		if (wsData.isServer) {
+			console.warn(`Relay "${this.state.code}": Server websocket error: ${error}`);
+		} else {
+			console.warn(`Relay "${this.state.code}": Client ${wsData.peerID} websocket error: ${error}`);
+		}
+	}
+
+	// Handle messages from the server
+	private async onServerMessage(message: RelayMessage): Promise<void> {
+		const payload: RelayMessagePayload = JSON.parse(message.pld);
+
+		// Handle the message based on its type
+		switch (payload.msg) {
+			case "dat":
+				await this.forwardDataFromServer(payload);
+				break;
+
+			case "dsc":
+				this.kickClient(payload.pid);
+				break;
+
+			case "con":
+				// Inform the client of the accepted connection
+				const clientID = payload.pid;
+				const clientWS = this.peers.get(clientID);
+
+				// Check that the client exists
+				if (clientWS === undefined) {
+					console.warn(`Relay "${this.state.code}": Server accepted invalid client ID`);
+					return;
 				}
-				ws.close();
-			}
-		}
 
-		this.saveState();
-	}
+				// Get client socket info
+				const socketID = clientWS.deserializeAttachment() as string;
+				const clientWSData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
 
-	webSocketError(ws: WebSocket, error: unknown): void {
-		this.cleanup();
-		const wsID = ws.deserializeAttachment() as string;
-		if (this.isSocketServer(wsID)) {
-			this.onServerError(new ErrorEvent("error", { error }));
-		} else {
-			const peerID = this.getPeerFromWebSocket(wsID);
-			if (peerID !== null) {
-				this.onClientError(peerID, new ErrorEvent("error", { error }));
-			} else {
-				console.warn(`Relay "${this.code}": Received error from unknown WebSocket`);
-			}
+				// Create the payload
+				const infoPayload: OmitUndefined<RelayMessagePayload.Info<"relay-to-client">> = {
+					msg: "inf",
+					key: clientWSData.key
+				};
+
+				const stringPayload = JSON.stringify(infoPayload);
+
+				// Create Packet
+				const infoPacket: RelayMessage = {
+					dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, clientWSData.key),
+					pld: stringPayload
+				};
+
+				// Send Packet
+				clientWS.send(JSON.stringify([infoPacket]));
+				break;
+
+			default:
+				console.warn(`Relay "${this.state.code}": Unexpected message type from server: ${payload.msg}`)
 		}
 	}
 
 	// Handle server disconnection
-	private onServerClose(event: CloseEvent) {
-		console.log(`Relay "${this.code}": server disconnected`);
-		this.getWebSocket(this.server)?.close();
-
-		// Reset the lobby state
+	private onServerClose() {
+		// Remove the server
 		this.server = null;
-		this.currentPeers = 0;
 
-		// Disconnect all connected peers
-		this.peers.forEach((peer) => {
-			this.getWebSocket(peer)?.close();
+		// Update database to mark the lobby as disconnected
+		this.env.RELAY_D1.prepare("UPDATE lobbies SET connected = 0 WHERE code = ?").bind(this.state.code).run().catch((err) => {
+			console.error(`Relay "${this.state.code}": Error updating lobby state in database: ${err.message}`);
 		});
-		this.peers.clear();
-
-		this.saveState();
-	}
-
-	// Handle messages from the server
-	private onServerMessage(event: MessageEvent): void {
-		// Deserialize the message
-		const data = new Uint8Array(event.data as ArrayBuffer);
-		if (data == undefined)
-			return;
-
-		var message = RelayMessage.deserialize(data, RelayMessage.Direction.SERVER_TO_RELAY);
-
-		// Handle the message based on its type
-		switch (message.type) {
-			case RelayMessage.Type.DATA:
-				this.forwardData(message as RelayMessage.ServerDataIn);
-				break;
-
-			case RelayMessage.Type.DISCONNECT:
-				this.kickClient(message.id);
-				break;
-
-			case RelayMessage.Type.CONNECT:
-				// Inform the client of the accepted connection
-				const msg: RelayMessage.InformConnectClient = {
-					direction: RelayMessage.Direction.RELAY_TO_CLIENT,
-					type: RelayMessage.Type.CONNECT
-				}
-				const acceptMsg = message as RelayMessage.AcceptConnection;
-				const peer = this.peers.get(acceptMsg.id);
-				if (peer != undefined)
-					this.getWebSocket(peer)?.send(RelayMessage.serialize(msg));
-				else
-					console.warn(`Relay "${this.code}": Cannot send accept to invalid peer ID "${acceptMsg.id}"`);
-				break;
-
-			case RelayMessage.Type.PING:
-				this.getWebSocket(this.server)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_SERVER }));
-				break;
-
-			default:
-				console.warn(`Relay "${this.code}": Unexpected message type from server: ${(data as Uint8Array)[0]}`)
-		}
 	}
 
 	// Disconnect a client by ID
-	private kickClient(ID: number): void {
-		// Find the client WebSocket
-		let ws = this.getPeerWebSocket(ID);
-		if (ws === null) {
-			console.warn(`Relay "${this.code}": Cannot kick client "${ID}" They do not exist.`);
+	private kickClient(pid: number): void {
+		const peer = this.peers.get(pid);
+
+		// Do nothing if there is no client with the pid
+		if (peer === undefined) {
+			console.warn(`Relay "${this.state.code}": Cannot kick client "${pid}" They do not exist.`);
 			return;
 		}
 
 		// Close the WebSocket and remove from peers
-		ws.close();
-		this.peers.delete(ID);
-		this.currentPeers &= ~(1 << ID);
-
-		// Inform the server of the disconnection
-		let msg: RelayMessage.InformDisconnect = {
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			type: RelayMessage.Type.DISCONNECT,
-			id: ID
-		};
-
-		if (this.server !== null) {
-			console.warn(`Relay "${this.code}": Cannot kick client "${ID}" No server connected.`);
-			this.getWebSocket(this.server)?.send(RelayMessage.serialize(msg));
-		}
-
-		this.saveState();
-	}
-
-	// Handle server WebSocket errors
-	private onServerError(error: ErrorEvent): void {
-		console.warn(`Relay "${this.code}": Server web socket error: ${error.message}`);
+		peer.close(1000, "Kicked From Server");
 	}
 
 	// Handle client disconnection
-	private onClientClose(ID: number, event: CloseEvent): void {
-		console.log(`Relay "${this.code}": Client "${ID}" disconnected`);
-		this.getPeerWebSocket(ID)?.close();
+	private async onClientClose(pid: number): Promise<void> {
+		this.peers.delete(pid);
 
-		// Inform the server of the disconnection
-		let msg: RelayMessage.InformDisconnect = {
-			direction: RelayMessage.Direction.RELAY_TO_SERVER,
-			type: RelayMessage.Type.DISCONNECT,
-			id: ID
+		if (this.server === null)
+			return;
+
+		const serverSocketID = this.server.deserializeAttachment() as string;
+		const serverData = this.state.websocketData.find(entry => entry.socketUID === serverSocketID)!.data;
+
+		// Create disconnect payload
+		const payload: RelayMessagePayload.Disconnect<"relay-to-server"> = {
+			msg: "dsc",
+			pid: pid
 		};
 
-		// Send the message to the server
-		if (this.server !== null) {
-			this.getWebSocket(this.server)?.send(RelayMessage.serialize(msg));
-		}
+		const stringPayload = JSON.stringify(payload);
 
-		// Remove the client from peers
-		this.peers.delete(ID);
-		this.currentPeers &= ~(1 << ID);
+		// Create disconnect message
+		const message: RelayMessage = {
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key),
+			pld: stringPayload
+		};
+
+		// Send disconnect message
+		this.server.send(JSON.stringify([message]));
 	}
 
 	// Handle messages from a client
-	private onClientMessage(ID: number, event: MessageEvent): void {
-		// Deserialize the message
-		const data = new Uint8Array(event.data as ArrayBuffer);
-		if (data == undefined)
-			return;
-
-		var message = RelayMessage.deserialize(data, RelayMessage.Direction.CLIENT_TO_RELAY);
+	private onClientMessage(pid: number, message: RelayMessage): void {
+		const payload: RelayMessagePayload = JSON.parse(message.pld);
 
 		// Handle the message based on its type
-		switch (message.type) {
-			case RelayMessage.Type.DATA:
-				this.forwardData(message as RelayMessage.ClientData, ID);
-				return;
-			case RelayMessage.Type.PING:
-				this.getPeerWebSocket(ID)?.send(RelayMessage.serialize({ type: RelayMessage.Type.PING, direction: RelayMessage.Direction.RELAY_TO_CLIENT }));
-				return;
+		switch (payload.msg) {
+			case "dat":
+				this.forwardDataFromClient(pid, payload);
+				break;
+
 			default:
-				console.warn(`Relay "${this.code}": Unexpected message type from client: ${(data as Uint8Array)[0]}`);
+				console.warn(`Relay "${this.state.code}": Unexpected message type from client: ${pid}`);
 				return;
 		}
 	}
 
-	// Handle client WebSocket errors
-	private onClientError(ID: number, error: ErrorEvent): void {
-		console.warn(`Relay "${this.code}": Client "${ID}" web socket error: ${error.message}`);
+	// Forward data from a server to one or more clients
+	private async forwardDataFromServer(payload: RelayMessagePayload.Data<"server-to-relay">): Promise<void> {
+		for (const [pid, socket] of this.peers) {
+			// Only send messages to intended peers
+			if (!payload.dst.includes(pid))
+				continue;
+
+			const socketID = socket.deserializeAttachment() as string;
+			const peerData = this.state.websocketData.find(entry => entry.socketUID === socketID)!.data;
+
+			// Create data payload
+			const newPayload: OmitUndefined<RelayMessagePayload.Data<"relay-to-client">> = {
+				msg: "dat",
+				dat: payload.dat
+			};
+
+			const stringPayload = JSON.stringify(newPayload);
+
+			const message: RelayMessage = {
+				dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, peerData.key),
+				pld: stringPayload
+			}
+
+			if (socket.readyState === WebSocket.OPEN)
+				socket.send(JSON.stringify([message]));
+		}
 	}
 
-	// Forward data between server and clients
-	private forwardData(message: RelayMessage.ServerDataIn): void;
-	private forwardData(message: RelayMessage.ClientData, source: number): void;
-	private forwardData(message: RelayMessage.ClientData | RelayMessage.ServerDataIn, source?: number): void {
-		// Forward based on message direction
-		if (message.direction === RelayMessage.Direction.SERVER_TO_RELAY) {
-			// Create a new message to send to clients
-			const newMessage: RelayMessage.ClientData = {
-				type: message.type,
-				direction: RelayMessage.Direction.RELAY_TO_CLIENT,
-				data: message.data
-			}
+	// Forward data from a client to the server
+	private async forwardDataFromClient(pid: number, payload: RelayMessagePayload.Data<"client-to-relay">): Promise<void> {
+		const packedMessage = await this.packDataPayload(pid, payload);
 
-			const serialMessage = RelayMessage.serialize(newMessage);
-
-			// Send to all connected peers
-			for (let i = 0; i < 32; i++) {
-				// Check if the peer is connected
-				const shouldSend: boolean =
-					(this.currentPeers >>> i & 1) === 1 &&
-					(message.destinations >>> i & 1) === 1;
-
-				// Send the message if connected
-				if (shouldSend) {
-					const peer = this.getPeerWebSocket(i);
-					if (peer != null)
-						peer.send(serialMessage);
-					else
-						console.warn(`Relay "${this.code}": Cannot send data to invalid peer ID "${i}"`);
-				}
-			}
-		} else if (message.direction === RelayMessage.Direction.CLIENT_TO_RELAY) {
-			// Create a new message to send to the server
-			const newMessage: RelayMessage.ServerDataOut = {
-				type: message.type,
-				direction: RelayMessage.Direction.RELAY_TO_SERVER,
-				source: source as number,
-				data: message.data
-			}
-
-			// Send to the server
-			if (this.server !== null) {
-				this.getWebSocket(this.server)?.send(RelayMessage.serialize(newMessage));
-			}
+		// Queue message if the server is not connected
+		if (packedMessage === null) {
+			this.state.serverMessageQueue.push({ pid, payload });
+			this.saveStateValue("serverMessageQueue");
+			return;
 		}
+
+		// Send data message
+		this.server!.send(JSON.stringify([packedMessage]));
+	}
+
+	private async packDataPayload(pid: number, payload: OmitUndefined<RelayMessagePayload.Data<"client-to-relay">>): Promise<RelayMessage | null> {
+		// Ignore messages if the server is not connected
+		if (this.server === null) {
+			return null;
+		}
+
+		// Get server data
+		const serverSocketID = this.server.deserializeAttachment() as string;
+		const serverData = this.state.websocketData.find(entry => entry.socketUID === serverSocketID)!.data;
+
+		// Create data payload
+		const newPayload: OmitUndefined<RelayMessagePayload.Data<"relay-to-server">> = {
+			msg: "dat",
+			src: pid,
+			dat: payload.dat
+		};
+
+		const stringPayload = JSON.stringify(newPayload);
+
+		// Create data message
+		const message: RelayMessage = {
+			pld: stringPayload,
+			dgs: await createMessageDigest(stringPayload, this.env.HMAC_APPLICATION_SECRET, serverData.key)
+		};
+
+		return message;
 	}
 }

@@ -18,7 +18,7 @@
             "type": "node",
             "console": "integratedTerminal",
             "env": {
-                "CLOUDFLARE_ENV": "development"
+                "CLOUDFLARE_ENV": "staging"
             }
         }
     ]
